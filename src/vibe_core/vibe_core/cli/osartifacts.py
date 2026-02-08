@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import hashlib
 import os
 import pathlib
 import platform
@@ -371,14 +372,43 @@ class OSArtifacts:
         )
         return terraform_dir
 
+    @staticmethod
+    def _hash_directory(directory: str) -> str:
+        """Compute a deterministic hash of all files in a directory tree."""
+        hasher = hashlib.sha256()
+        for root, dirs, files in os.walk(directory):
+            dirs.sort()
+            for fname in sorted(files):
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath, "rb") as f:
+                        hasher.update(f.read())
+                except OSError:
+                    pass
+        return hasher.hexdigest()
+
     def _resolve_terraform_directory(self, directory: str) -> str:
         if not os.access(directory, os.W_OK) or "site-packages" in directory:
             log(
-                "Terrafom directory not writable or in site-packages, copying to local directory",
+                "Terraform directory not writable or in site-packages, syncing to local directory",
                 level="debug",
             )
+            source_dir = os.path.dirname(directory)
             local_dir = self.config_dir / "terraform-user"
-            shutil.copytree(os.path.dirname(directory), local_dir, dirs_exist_ok=True)
+            hash_file = local_dir / ".source_hash"
+            current_hash = self._hash_directory(source_dir)
+
+            needs_copy = (
+                not (local_dir / os.path.basename(directory)).exists()
+                or not hash_file.exists()
+                or hash_file.read_text().strip() != current_hash
+            )
+            if needs_copy:
+                log("Terraform source changed, syncing to local directory", level="debug")
+                shutil.copytree(source_dir, local_dir, dirs_exist_ok=True)
+                hash_file.write_text(current_hash)
+            else:
+                log("Terraform source unchanged, reusing local directory", level="debug")
             return str(local_dir / os.path.basename(directory))
         return directory
 
