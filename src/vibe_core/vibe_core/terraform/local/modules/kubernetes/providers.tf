@@ -23,18 +23,7 @@ terraform {
 provider "kubernetes" {
   config_path    = var.kubernetes_config_path
   config_context = var.kubernetes_config_context
-
-  exec {
-    api_version = "client.authentication.k8s.io/v1beta1"
-    command     = "kubelogin"
-    args = [
-      "get-token",
-      "--use-azurerm-env-vars",
-      "|",
-      "jq",
-      ".status.token"
-    ]
-  }
+  # Local k3d uses credentials directly from kubeconfig, no exec auth needed
 }
 
 provider "helm" {
