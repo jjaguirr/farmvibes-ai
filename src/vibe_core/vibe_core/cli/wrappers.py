@@ -495,6 +495,12 @@ class TerraformWrapper:
     ):
         if not is_update:
             self.init(self.os_artifacts.local_directory, False, cleanup_state=True)
+            # Remove stale state file so terraform starts fresh against the new cluster
+            state_file_path = self.os_artifacts.get_terraform_file("local.tfstate", cluster_name)
+            for stale in [state_file_path, f"{state_file_path}.backup"]:
+                if os.path.exists(stale):
+                    log(f"Removing stale terraform state: {stale}", level="debug")
+                    os.remove(stale)
         variables: Dict[str, str] = {
             "acr_registry": registry,
             "run_as_user_id": f"{self.getuid()}",
