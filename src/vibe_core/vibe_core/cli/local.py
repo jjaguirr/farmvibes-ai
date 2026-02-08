@@ -490,24 +490,139 @@ def write_service_url(os_artifacts: OSArtifacts, cluster: Dict[str, Any]):
 
 
 def status(k3d: K3dWrapper) -> bool:
+    console = Console()
     cluster = k3d.info()
+
     if not cluster:
         log(f"Cluster {k3d.cluster_name} not found", level="error")
         return False
-    else:
-        log(f"Cluster {k3d.cluster_name} found", level="debug")
-        if cluster["serversRunning"] > 0:
-            log(
-                f"Cluster {k3d.cluster_name} is running with {cluster['serversRunning']} "
-                f"servers and {cluster['agentsRunning']} agents."
-            )
-            service_url = write_service_url(k3d.os_artifacts, cluster)
-            if service_url:
-                log(f"Service url is {service_url}")
+
+    log(f"Cluster {k3d.cluster_name} found", level="debug")
+
+    if cluster["serversRunning"] == 0:
+        log(f"Cluster {k3d.cluster_name} is not running", level="warning")
+        return False
+
+    # Get service URL
+    service_url = write_service_url(k3d.os_artifacts, cluster)
+
+    # Print cluster info
+    console.print(f"\n[bold]Cluster:[/bold] {k3d.cluster_name} ([green]running[/green])")
+    console.print(
+        f"[bold]Nodes:[/bold] {cluster['serversRunning']} servers, "
+        f"{cluster['agentsRunning']} agents"
+    )
+    if service_url:
+        console.print(f"[bold]REST API:[/bold] {service_url}")
+
+    # Check API health
+    api_healthy = False
+    if service_url:
+        try:
+            response = requests.get(f"{service_url}/v0/healthz", timeout=5)
+            if response.status_code == 200:
+                api_healthy = True
+                console.print("[bold]API Health:[/bold] [green]✓ Healthy[/green]")
+            else:
+                console.print(
+                    f"[bold]API Health:[/bold] [red]✗ Unhealthy[/red] "
+                    f"(status {response.status_code})"
+                )
+        except Exception as e:
+            console.print(f"[bold]API Health:[/bold] [red]✗ Unreachable[/red] ({e})")
+
+    # Get pods and build table
+    kubectl = KubectlWrapper(k3d.os_artifacts, k3d.cluster_name)
+    try:
+        with kubectl.context():
+            pods = kubectl.list_pods()
+    except Exception as e:
+        log(f"Failed to get pod status: {e}", level="error")
+        return False
+
+    # Build Rich table
+    table = Table(title="\nServices", show_header=True, header_style="bold")
+    table.add_column("SERVICE", style="cyan")
+    table.add_column("STATE")
+    table.add_column("RESTARTS", justify="right")
+    table.add_column("AGE")
+    table.add_column("LAST EVENT")
+
+    all_healthy = True
+    for pod in pods.get("items", []):
+        metadata = pod["metadata"]
+        status_info = pod["status"]
+        pod_name = metadata["name"]
+
+        # Extract container status
+        container_statuses = status_info.get("containerStatuses", [])
+        if not container_statuses:
+            continue
+
+        # Get primary container (first one)
+        container = container_statuses[0]
+        restarts = container.get("restartCount", 0)
+
+        # Determine state and color
+        state = "Unknown"
+        state_color = "yellow"
+        last_event = ""
+
+        if container.get("ready"):
+            state = "Running"
+            state_color = "green"
+            last_event = "Ready"
+        elif container.get("state", {}).get("waiting"):
+            waiting = container["state"]["waiting"]
+            state = waiting.get("reason", "Waiting")
+            state_color = "yellow"
+            last_event = waiting.get("message", "")[:50]
+            all_healthy = False
+        elif container.get("state", {}).get("terminated"):
+            terminated = container["state"]["terminated"]
+            state = "Terminated"
+            state_color = "red"
+            last_event = terminated.get("reason", "")
+            all_healthy = False
+
+        # Check for crash loop
+        if restarts > 3:
+            state = "CrashLoop"
+            state_color = "red"
+            all_healthy = False
+            if container.get("lastState", {}).get("terminated"):
+                reason = container["lastState"]["terminated"].get("reason", "Unknown")
+                last_event = f"Last: {reason}"
+
+        # Calculate age
+        creation_time = metadata.get("creationTimestamp", "")
+        if creation_time:
+            created = datetime.fromisoformat(creation_time.replace("Z", "+00:00"))
+            age_seconds = (datetime.now(timezone.utc) - created).total_seconds()
+            if age_seconds < 60:
+                age = f"{int(age_seconds)}s"
+            elif age_seconds < 3600:
+                age = f"{int(age_seconds / 60)}m"
+            elif age_seconds < 86400:
+                age = f"{int(age_seconds / 3600)}h"
+            else:
+                age = f"{int(age_seconds / 86400)}d"
         else:
-            log(f"Cluster {k3d.cluster_name} is not running", level="warning")
-            return False
-        return True
+            age = "unknown"
+
+        table.add_row(
+            pod_name,
+            f"[{state_color}]{state}[/{state_color}]",
+            str(restarts),
+            age,
+            last_event[:50],
+        )
+
+    console.print(table)
+    console.print()
+
+    # Return overall health status
+    return all_healthy and api_healthy
 
 
 def health(k3d: K3dWrapper) -> bool:
