@@ -1703,6 +1703,16 @@ class DockerWrapper:
         )
         return json.loads(result)
 
+    def manifest_inspect(self, image: str) -> str:
+        """Check if an image exists in its registry without pulling it."""
+        cmd = [self.os_artifacts.docker, "manifest", "inspect", image]
+        return execute_cmd(
+            cmd,
+            error_string=f"Image not found: {image}",
+            capture_output=True,
+            subprocess_log_level="debug",
+        )
+
     def exec(self, container_name: str, command: List[str]):
         cmd = [self.os_artifacts.docker, "exec", "-it", container_name] + command
         result = execute_cmd(
