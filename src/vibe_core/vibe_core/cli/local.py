@@ -20,6 +20,10 @@ from vibe_core.cli.constants import (
     FARMVIBES_AI_LOG_LEVEL,
     LOCAL_SERVICE_URL_PATH_FILE,
     ONNX_SUBDIR,
+    RABBITMQ_IMAGE_REPOSITORY,
+    RABBITMQ_IMAGE_TAG,
+    REDIS_IMAGE_REPOSITORY,
+    REDIS_IMAGE_TAG,
 )
 from vibe_core.cli.errors import show_error, show_success
 from vibe_core.cli.helper import verify_to_proceed
@@ -233,6 +237,28 @@ def check_disk_space(storage_path: str, space_in_gb: int = 30) -> bool:
     return True
 
 
+def check_images_accessible(docker: DockerWrapper) -> bool:
+    """Pre-flight: verify base images are reachable before deploying."""
+    images = [
+        f"{REDIS_IMAGE_REPOSITORY}:{REDIS_IMAGE_TAG}",
+        f"{RABBITMQ_IMAGE_REPOSITORY}:{RABBITMQ_IMAGE_TAG}",
+    ]
+    for image in images:
+        log(f"Checking image availability: {image}")
+        try:
+            docker.manifest_inspect(image)
+        except Exception:
+            log(
+                f"Cannot access image '{image}'. "
+                "Verify that the image tag exists in the repository "
+                f"and that the registry is reachable. "
+                f"Run `docker manifest inspect {image}` to diagnose.",
+                level="error",
+            )
+            return False
+    return True
+
+
 def setup(
     k3d: K3dWrapper,
     servers: int = 1,
@@ -335,6 +361,11 @@ def setup(
                 log("Unable to upgrade Dapr CRDs", level="error")
                 return False
             dapr_updated = True
+
+    # Pre-flight: verify required base images are accessible before running Terraform
+    _docker = DockerWrapper(k3d.os_artifacts)
+    if not check_images_accessible(_docker):
+        return False
 
     terraform = TerraformWrapper(k3d.os_artifacts, az)
     with progress.step("Deploying services via Terraform (this may take several minutes)"):
