@@ -20,6 +20,8 @@ from .help_descriptions import (
     ADD_SECRET_HELP,
     DELETE_SECRET_HELP,
     DESTROY_HELP,
+    HEALTH_HELP,
+    LOGS_HELP,
     RESTART_HELP,
     SETUP_HELP,
     START_HELP,
@@ -52,6 +54,8 @@ class CliParser(ABC):
         ("stop", STOP_HELP, ["down", "halt"]),
         ("restart", RESTART_HELP, ["reboot", "reload"]),
         ("status", STATUS_HELP, ["info", "show", "url", "show-url"]),
+        ("health", HEALTH_HELP, []),
+        ("logs", LOGS_HELP, []),
         ("add-secret", ADD_SECRET_HELP, ["add_secret"]),
         ("delete-secret", DELETE_SECRET_HELP, ["delete_secret"]),
         ("add-onnx", ADD_ONNX_HELP, ["add_onnx", "add-model"]),
@@ -94,6 +98,26 @@ class CliParser(ABC):
         # stop doesn't need any flags
         # restart doesn't need any flags
         # status doesn't need any flags
+        # health doesn't need any flags
+
+        # logs command flags
+        self.commands["logs"].add_argument(
+            "service_name",
+            help="Name of the service to get logs from (e.g., 'terravibes-rest-api', 'worker')",
+        )
+        self.commands["logs"].add_argument(
+            "--tail",
+            type=int,
+            default=None,
+            help="Number of recent log lines to show (implies --no-follow)",
+        )
+        self.commands["logs"].add_argument(
+            "--no-follow",
+            action="store_true",
+            default=False,
+            help="Don't follow log output (default: follow like 'tail -f')",
+        )
+
         for secret in (self.commands["add-secret"], self.commands["delete-secret"]):
             secret.add_argument(
                 "secret_name",

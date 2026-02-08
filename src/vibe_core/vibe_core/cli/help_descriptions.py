@@ -48,3 +48,13 @@ images to an existing FarmVibes.AI cluster.\
 
 After images are successfully pulled, restarts the FarmVibes.AI services so\
 that they use these new images."""
+
+HEALTH_HELP = """\
+Checks the health of the FarmVibes.AI cluster. Verifies that the REST API is \
+responsive, all services are running, and returns a meaningful exit code \
+(0 = healthy, non-zero = unhealthy). Useful for monitoring and CI/CD pipelines."""
+
+LOGS_HELP = """\
+Streams logs from a specific service in the FarmVibes.AI cluster. By default, \
+follows the logs in real-time (like tail -f). Use --tail to show the last N lines \
+and exit, or --no-follow to disable following mode."""

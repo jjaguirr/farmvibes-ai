@@ -504,6 +504,85 @@ def status(k3d: K3dWrapper) -> bool:
         return True
 
 
+def health(k3d: K3dWrapper) -> bool:
+    """Check cluster health and return exit code suitable for monitoring."""
+    console = Console()
+
+    # Check if cluster exists and is running
+    cluster = k3d.info()
+    if not cluster:
+        console.print("[red]✗ Cluster not found[/red]")
+        return False
+
+    if cluster["serversRunning"] == 0:
+        console.print("[red]✗ Cluster not running[/red]")
+        return False
+
+    # Get service URL
+    service_url = write_service_url(k3d.os_artifacts, cluster)
+    if not service_url:
+        console.print("[red]✗ Cannot determine service URL[/red]")
+        return False
+
+    # Check API health
+    api_healthy = False
+    response_time = None
+    try:
+        import time
+
+        start = time.time()
+        response = requests.get(f"{service_url}/v0/healthz", timeout=5)
+        response_time = time.time() - start
+
+        if response.status_code == 200:
+            api_healthy = True
+            console.print(
+                f"[green]✓ API healthy[/green] (response time: {response_time*1000:.0f}ms)"
+            )
+        else:
+            console.print(f"[red]✗ API returned status {response.status_code}[/red]")
+            return False
+    except requests.exceptions.Timeout:
+        console.print("[red]✗ API timeout (>5s)[/red]")
+        return False
+    except Exception as e:
+        console.print(f"[red]✗ API unreachable: {e}[/red]")
+        return False
+
+    # Check pod health
+    kubectl = KubectlWrapper(k3d.os_artifacts, k3d.cluster_name)
+    try:
+        with kubectl.context():
+            pods = kubectl.list_pods()
+    except Exception as e:
+        console.print(f"[red]✗ Cannot get pod status: {e}[/red]")
+        return False
+
+    unhealthy_pods = []
+    for pod in pods.get("items", []):
+        container_statuses = pod["status"].get("containerStatuses", [])
+        if not container_statuses:
+            continue
+
+        container = container_statuses[0]
+        restarts = container.get("restartCount", 0)
+
+        # Check for problems
+        if not container.get("ready"):
+            unhealthy_pods.append(pod["metadata"]["name"])
+        elif restarts > 3:
+            unhealthy_pods.append(f"{pod['metadata']['name']} (crash loop)")
+
+    if unhealthy_pods:
+        console.print(f"[red]✗ Unhealthy services:[/red]")
+        for pod in unhealthy_pods:
+            console.print(f"  - {pod}")
+        return False
+
+    console.print("[green]✓ All services healthy[/green]")
+    return True
+
+
 def start(k3d: K3dWrapper) -> bool:
     if not k3d.cluster_exists():
         log(f"Cluster {k3d.cluster_name} does not exist, nothing to start", level="error")
@@ -664,6 +743,11 @@ def dispatch(args: argparse.Namespace):
         return restart(k3d)
     elif args.action in {"status", "url", "show-url"}:
         return status(k3d)
+    elif args.action == "health":
+        return health(k3d)
+    elif args.action == "logs":
+        no_follow = args.no_follow or (args.tail is not None)
+        return logs(os_artifacts, args.cluster_name, args.service_name, args.tail, no_follow)
     elif args.action in {"add-secret", "add_secret"}:
         return add_secret(os_artifacts, args.cluster_name, args.secret_name, args.secret_value)
     elif args.action in {"delete-secret", "delete_secret"}:
