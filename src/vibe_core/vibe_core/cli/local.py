@@ -5,7 +5,13 @@ import argparse
 import codecs
 import os
 import shutil
+import subprocess
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
+
+import requests
+from rich.console import Console
+from rich.table import Table
 
 from vibe_core.cli.constants import (
     AZURE_CR_DOMAIN,
@@ -666,6 +672,62 @@ def add_onnx(cluster_name: str, storage_path: str, onnx: str):
             log(f"Could not copy {onnx} to {destination}: {e}", level="error")
             return False
     return True
+
+
+def logs(
+    os_artifacts: OSArtifacts,
+    cluster_name: str,
+    service_name: str,
+    tail: Optional[int] = None,
+    no_follow: bool = False,
+) -> bool:
+    """Stream logs from a service in the cluster."""
+    log(f"Getting logs for service {service_name}")
+    kubectl = KubectlWrapper(os_artifacts, cluster_name)
+
+    # Build kubectl logs command
+    cmd = [os_artifacts.kubectl, "logs"]
+
+    # Add follow flag (default true unless tail is specified or no_follow is set)
+    if not no_follow and tail is None:
+        cmd.append("-f")
+
+    # Add timestamps
+    cmd.append("--timestamps=true")
+
+    # Add tail if specified
+    if tail is not None:
+        cmd.extend(["--tail", str(tail)])
+
+    # Add service name (will match pod by prefix)
+    cmd.append(service_name)
+
+    try:
+        with kubectl.context():
+            # Run kubectl logs directly, streaming to stdout
+            subprocess.run(cmd, check=True)
+        return True
+    except subprocess.CalledProcessError:
+        # Service not found, try to suggest available services
+        log(f"Service '{service_name}' not found", level="error")
+        try:
+            pods = kubectl.list_pods()
+            available_services = set()
+            for pod in pods.get("items", []):
+                pod_name = pod["metadata"]["name"]
+                # Extract service prefix (before the hash)
+                service_prefix = "-".join(pod_name.split("-")[:-2])
+                if service_prefix:
+                    available_services.add(service_prefix)
+
+            if available_services:
+                log(f"Available services: {', '.join(sorted(available_services))}")
+        except Exception:
+            pass
+        return False
+    except Exception as e:
+        log(f"Failed to get logs: {e}", level="error")
+        return False
 
 
 def dispatch(args: argparse.Namespace):
