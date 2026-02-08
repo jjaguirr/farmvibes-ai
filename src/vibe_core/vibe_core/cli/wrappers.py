@@ -17,7 +17,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .constants import RABBITMQ_IMAGE_TAG, REDIS_IMAGE_TAG
+from .constants import (
+    RABBITMQ_IMAGE_REPOSITORY,
+    RABBITMQ_IMAGE_TAG,
+    REDIS_IMAGE_REPOSITORY,
+    REDIS_IMAGE_TAG,
+)
 from .helper import execute_cmd, is_port_free, log_should_be_logged_in, verify_to_proceed
 from .logging import ColorFormatter, log
 from .osartifacts import OSArtifacts
@@ -481,7 +486,9 @@ class TerraformWrapper:
         config_context: str,
         enable_telemetry: bool,
         redis_image_tag: str = REDIS_IMAGE_TAG,
+        redis_image_repository: str = REDIS_IMAGE_REPOSITORY,
         rabbitmq_image_tag: str = RABBITMQ_IMAGE_TAG,
+        rabbitmq_image_repository: str = RABBITMQ_IMAGE_REPOSITORY,
         is_update: bool = False,
     ):
         if not is_update:
@@ -498,7 +505,9 @@ class TerraformWrapper:
             "worker_replicas": f"{worker_replicas}",
             "image_prefix": image_prefix,
             "redis_image_tag": redis_image_tag,
+            "redis_image_repository": redis_image_repository,
             "rabbitmq_image_tag": rabbitmq_image_tag,
+            "rabbitmq_image_repository": rabbitmq_image_repository,
             "enable_telemetry": f"{'true' if enable_telemetry else 'false'}",
             "farmvibes_log_level": log_level,
             "max_log_file_bytes": f"{max_log_file_bytes}" if max_log_file_bytes else "",

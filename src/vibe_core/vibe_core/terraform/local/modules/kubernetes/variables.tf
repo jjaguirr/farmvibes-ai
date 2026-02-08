@@ -17,7 +17,13 @@ variable "host_storage_path" {
 variable "redis_image_tag" {
 }
 
+variable "redis_image_repository" {
+}
+
 variable "rabbitmq_image_tag" {
+}
+
+variable "rabbitmq_image_repository" {
 }
 
 variable "enable_telemetry" {

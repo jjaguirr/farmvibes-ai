@@ -10,6 +10,14 @@ resource "helm_release" "redis" {
 
   set = [
     {
+      name  = "image.repository"
+      value = var.redis_image_repository
+    },
+    {
+      name  = "global.security.allowInsecureImages"
+      value = "true"
+    },
+    {
       name  = "commonConfiguration"
       value = "appendonly no"
     },
