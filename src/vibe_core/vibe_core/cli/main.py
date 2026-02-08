@@ -57,7 +57,11 @@ def main():
 
     args = parser.parse(unknown_args)
     try:
-        dispatcher(args)
+        result = dispatcher(args)
+        if isinstance(result, int):
+            sys.exit(result)
+        elif result is False:
+            sys.exit(1)
     except Exception as e:
         log(
             f"farmvibes-ai {parser.name} failed ({e}). Please see the above error descriptions. "

@@ -34,7 +34,15 @@ Starts an existing FarmVibes.AI cluster. This also starts the kubernetes control
 plane, and helper services, such as a redis instance, that support the execution\
 of FarmVibes.AI."""
 
-STATUS_HELP = "Shows the FarmVibes.AI cluster's status (if one exists)."
+STATUS_HELP = "Shows the FarmVibes.AI cluster's status as a formatted table (if one exists)."
+
+HEALTH_HELP = """\
+Checks whether the FarmVibes.AI cluster and its services are healthy. \
+Exits with 0 if healthy, 1 if degraded, 2 if down. Suitable for CI and monitoring hooks."""
+
+LOGS_HELP = """\
+Stream logs from a FarmVibes.AI service. Follows by default. \
+Pass --no-follow with --tail N to dump the last N lines and exit."""
 
 STOP_HELP = """\
 Stops an existing FarmVibes.AI cluster. This also stops the kubernetes control\

@@ -144,6 +144,7 @@ class TerraformWrapper:
                 f"in {working_directory}"
             ),
             capture_output=True,
+            subprocess_log_level="debug",
             env_vars=env_vars,
         )
         return stdout
@@ -232,6 +233,7 @@ class TerraformWrapper:
                 True,
                 False,
                 f"Failed to initialize terraform in {working_directory}",
+                subprocess_log_level="debug",
                 env_vars=env_vars,
             )
 
@@ -491,6 +493,7 @@ class TerraformWrapper:
             "run_as_user_id": f"{self.getuid()}",
             "run_as_group_id": f"{self.getgid()}",
             "host_assets_dir": os.path.join(data_path, "assets"),
+            "kubernetes_config_path": str(self.os_artifacts.config_file("kubeconfig")),
             "kubernetes_config_context": config_context,
             "image_tag": image_tag,
             "node_pool_name": f"{cluster_name}",
@@ -1496,6 +1499,81 @@ class KubectlWrapper:
                         continue
         log(f"Failed to apply updates to CRD {file_path}", level="error")
         return False  # Should never reach here
+
+    def get_services(self, cluster_name: str = "") -> List[str]:
+        """Get list of unique service app-label names in the cluster."""
+        with self.context(cluster_name):
+            cmd = [
+                self.os_artifacts.kubectl,
+                "get",
+                "pods",
+                "-o",
+                "jsonpath={.items[*].metadata.labels.app}",
+            ]
+            result = execute_cmd(
+                cmd,
+                error_string="Unable to list services",
+                subprocess_log_level="debug",
+                check_empty_result=False,
+            )
+            return sorted(set(s for s in result.split() if s))
+
+    def get_pod_status(self, cluster_name: str = "") -> List[Dict[str, Any]]:
+        """Get status details for all pods."""
+        pods_data = self.list_pods(cluster_name)
+        result = []
+        for pod in pods_data.get("items", []):
+            metadata = pod.get("metadata", {})
+            status = pod.get("status", {})
+            name = metadata.get("name", "unknown")
+            app_label = metadata.get("labels", {}).get("app", name.split("-")[0])
+            phase = status.get("phase", "Unknown")
+            start_time = status.get("startTime", "")
+            container_statuses = status.get("containerStatuses", [])
+            restarts = container_statuses[0].get("restartCount", 0) if container_statuses else 0
+            result.append({
+                "name": name,
+                "app": app_label,
+                "phase": phase,
+                "start_time": start_time,
+                "restarts": restarts,
+            })
+        return result
+
+    def stream_logs(
+        self,
+        service: str,
+        tail: Optional[int] = None,
+        since: Optional[str] = None,
+        follow: bool = True,
+        cluster_name: str = "",
+    ) -> bool:
+        """Stream logs for all pods matching a service label."""
+        cmd = [self.os_artifacts.kubectl, "logs"]
+        if follow:
+            cmd.append("-f")
+        if tail is not None:
+            cmd.extend(["--tail", str(tail)])
+        if since:
+            cmd.extend(["--since", since])
+        cmd.extend(["-l", f"app={service}", "--timestamps", "--prefix"])
+
+        import subprocess
+
+        env = {**__import__("os").environ}
+        # Ensure kubeconfig is set from the context
+        kubeconfig = self.os_artifacts.config_file("kubeconfig")
+        if kubeconfig and __import__("os").path.exists(str(kubeconfig)):
+            env["KUBECONFIG"] = str(kubeconfig)
+
+        try:
+            result = subprocess.run(cmd, env=env)
+            return result.returncode == 0
+        except KeyboardInterrupt:
+            return True  # Ctrl-C is a normal exit for log streaming
+        except Exception as e:
+            log(f"Unable to stream logs for {service}: {e}", level="error")
+            return False
 
 
 class K3dWrapper:

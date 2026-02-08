@@ -5,7 +5,12 @@ import argparse
 import codecs
 import os
 import shutil
-from typing import Any, Dict, Optional, Tuple
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+import requests
+from rich.console import Console
+from rich.table import Table
 
 from vibe_core.cli.constants import (
     AZURE_CR_DOMAIN,
@@ -16,9 +21,11 @@ from vibe_core.cli.constants import (
     LOCAL_SERVICE_URL_PATH_FILE,
     ONNX_SUBDIR,
 )
+from vibe_core.cli.errors import show_error, show_success
 from vibe_core.cli.helper import verify_to_proceed
 from vibe_core.cli.logging import log
 from vibe_core.cli.osartifacts import InstallType, OSArtifacts
+from vibe_core.cli.progress import ProgressTracker
 from vibe_core.cli.wrappers import (
     AzureCliWrapper,
     DaprWrapper,
@@ -247,70 +254,64 @@ def setup(
     is_update: bool = False,
     registry_port: int = REGISTRY_PORT,
 ) -> bool:
-    if not is_update:
-        log("Setting up local cluster")
-    else:
-        log("Updating local cluster")
+    action = "Updating" if is_update else "Setting up"
+    progress = ProgressTracker(f"{action} local cluster")
+    progress.start()
 
-    if k3d.cluster_exists():
-        if not is_update:
+    with progress.step("Validating cluster state"):
+        if k3d.cluster_exists():
+            if not is_update:
+                log("Seems like you might have a cluster already created.", level="warning")
+                confirmation = verify_to_proceed(
+                    "Do you want to abort this setup and continue with the existing cluster? "
+                    "Answering 'no' will destroy the existing cluster and create a new one."
+                )
+                if confirmation:
+                    log("Aborting setup. Keeping existing cluster due to user confirmation.")
+                    return True
+                else:
+                    destroy(k3d, skip_confirmation=True, data_path=data_path)
+        else:
+            if is_update:
+                log("No existing cluster found to update. Aborting update.", level="error")
+                return False
+
+    with progress.step("Configuring storage"):
+        if not os.path.exists(storage_path):
+            os.makedirs(storage_path, exist_ok=True)
+        if not os.path.exists(data_path):
+            os.makedirs(data_path, exist_ok=True)
+        if not check_disk_space(storage_path):
+            return False
+
+    if not is_update:
+        with progress.step("Creating k3d cluster"):
+            if not k3d.create(servers, agents, storage_path, registry_port, port, host):
+                log("Unable to create cluster", level="error")
+                return False
+
+    kubectl = KubectlWrapper(k3d.os_artifacts, k3d.cluster_name)
+    az = None
+
+    with progress.step("Configuring registry credentials"):
+        if registry.endswith(AZURE_CR_DOMAIN) and (not username or not password):
+            k3d.os_artifacts.check_dependencies(InstallType.ALL)
+            az = AzureCliWrapper(k3d.os_artifacts, "")
             log(
-                "Seems like you might have a cluster already created.",
+                f"Username and password not provided for {registry}, requesting from Azure CLI",
                 level="warning",
             )
-            confirmation = verify_to_proceed(
-                "Do you want to abort this setup and continue with the existing cluster? "
-                "Answering 'no' will destroy the existing cluster and create a new one."
-            )
-            if confirmation:
-                log("Aborting setup. Keeping existing cluster due to user confirmation.")
-                return True
-            else:
-                destroy(k3d, skip_confirmation=True, data_path=data_path)
-    else:
-        if is_update:
-            log("No existing cluster found to update. Aborting update.", level="error")
-            return False
+            password = az.request_registry_token(registry)
 
-    if not os.path.exists(storage_path):
-        log(f"Creating storage path {storage_path}")
-        os.makedirs(storage_path, exist_ok=True)
-
-    if not os.path.exists(data_path):
-        log(f"Creating data path {data_path}")
-        os.makedirs(data_path, exist_ok=True)
-
-    if not check_disk_space(storage_path):
-        return False
-
-    if not is_update:
-        log(f"Creating cluster {k3d.cluster_name}")
-        if not k3d.create(servers, agents, storage_path, registry_port, port, host):
-            log("Unable to create cluster", level="error")
-            return False
-
-    az = None
-    kubectl = KubectlWrapper(k3d.os_artifacts, k3d.cluster_name)
-    if registry.endswith(AZURE_CR_DOMAIN) and (not username or not password):
-        k3d.os_artifacts.check_dependencies(InstallType.ALL)
-        az = AzureCliWrapper(k3d.os_artifacts, "")
-        log(
-            f"Username and password not provided for {registry}, requesting from Azure CLI",
-            level="warning",
-        )
-        password = az.request_registry_token(registry)
-
-    if password:
-        log(f"Creating Docker credentials for registry {registry}")
-        try:
-            kubectl.delete_secret("acrtoken")
-        except Exception:
-            pass
-        if not username:
-            username = "00000000-0000-0000-0000-000000000000"
-        kubectl.create_docker_token("acrtoken", registry, username, password)
-    else:
-        if registry.endswith(AZURE_CR_DOMAIN):
+        if password:
+            try:
+                kubectl.delete_secret("acrtoken")
+            except Exception:
+                pass
+            if not username:
+                username = "00000000-0000-0000-0000-000000000000"
+            kubectl.create_docker_token("acrtoken", registry, username, password)
+        elif registry.endswith(AZURE_CR_DOMAIN):
             log(
                 "No registry username and password were provided, and I was unable to "
                 "get an ACR token. Aborting installation.",
@@ -318,63 +319,65 @@ def setup(
             )
             return False
 
-    if not worker_replicas:
-        log(
-            "No worker replicas specified. "
-            "You can change this by re-running with "
-            "`farmvibes-ai local setup --worker-replicas <number> ...`",
-        )
-        return False
+        if not worker_replicas:
+            log(
+                "No worker replicas specified. "
+                "You can change this by re-running with "
+                "`farmvibes-ai local setup --worker-replicas <number> ...`",
+            )
+            return False
 
     dapr_updated = False
     dapr = DaprWrapper(kubectl.os_artifacts, kubectl)
     if is_update and dapr.needs_upgrade():
-        log("Upgrading Dapr CRDs")
-        if not dapr.upgrade_crds():
-            log("Unable to upgrade Dapr CRDs", level="error")
-            return False
-        dapr_updated = True
+        with progress.step("Upgrading Dapr"):
+            if not dapr.upgrade_crds():
+                log("Unable to upgrade Dapr CRDs", level="error")
+                return False
+            dapr_updated = True
 
     terraform = TerraformWrapper(k3d.os_artifacts, az)
-    with terraform.workspace(f"farmvibes-k3d-{k3d.cluster_name}"):
-        terraform.ensure_local_cluster(
-            k3d.cluster_name,
-            registry,
-            log_level,
-            max_log_file_bytes,
-            log_backup_count,
-            image_tag,
-            image_prefix,
-            data_path,
-            worker_replicas,
-            kubectl.context_name,
-            enable_telemetry,
-            is_update=is_update,
-        )
-    # We might have downloaded newer images, so we have to fix permissions
-    docker = DockerWrapper(k3d.os_artifacts)
-    try:
-        log("Fixing permissions on containerd image path", level="debug")
-        container_name = f"k3d-{k3d.cluster_name}-server-0"
-        uid_gid = f"{terraform.getuid()}:{terraform.getgid()}"
-        docker.exec(container_name, ["chown", "-R", uid_gid, k3d.CONTAINERD_IMAGE_PATH])
+    with progress.step("Deploying services via Terraform (this may take several minutes)"):
+        with terraform.workspace(f"farmvibes-k3d-{k3d.cluster_name}"):
+            terraform.ensure_local_cluster(
+                k3d.cluster_name,
+                registry,
+                log_level,
+                max_log_file_bytes,
+                log_backup_count,
+                image_tag,
+                image_prefix,
+                data_path,
+                worker_replicas,
+                kubectl.context_name,
+                enable_telemetry,
+                is_update=is_update,
+            )
 
-    except Exception:
-        log("Unable to fix permissions on containerd image path", level="warning")
+    with progress.step("Fixing file permissions"):
+        docker = DockerWrapper(k3d.os_artifacts)
+        try:
+            container_name = f"k3d-{k3d.cluster_name}-server-0"
+            uid_gid = f"{terraform.getuid()}:{terraform.getgid()}"
+            docker.exec(container_name, ["chown", "-R", uid_gid, k3d.CONTAINERD_IMAGE_PATH])
+        except Exception:
+            log("Unable to fix permissions on containerd image path", level="warning")
 
     if dapr_updated:
-        log("dapr upgraded, restarting services")
-        with kubectl.context(kubectl.cluster_name):
-            kubectl.restart("deployment", selectors=["backend=terravibes"])
-
-    log(f"Cluster {'update' if is_update else 'setup'} complete!")
+        with progress.step("Restarting services after Dapr upgrade"):
+            with kubectl.context(kubectl.cluster_name):
+                kubectl.restart("deployment", selectors=["backend=terravibes"])
 
     if not is_update:
-        restore_redis_data(kubectl, data_path)
+        with progress.step("Restoring state data"):
+            restore_redis_data(kubectl, data_path)
 
-    status(k3d)
     with open(k3d.os_artifacts.config_dir / "storage", "w") as f:
         f.write(storage_path)
+
+    show_success(f"Cluster {'update' if is_update else 'setup'} complete!")
+    Console(stderr=True).print()
+    status(k3d)
     return True
 
 
@@ -452,25 +455,164 @@ def write_service_url(os_artifacts: OSArtifacts, cluster: Dict[str, Any]):
     return service_url
 
 
-def status(k3d: K3dWrapper) -> bool:
+def _check_api_health(service_url: str, timeout: int = 5) -> Tuple[bool, Optional[float]]:
+    """Returns (is_healthy, response_time_ms)."""
+    try:
+        start = datetime.now()
+        response = requests.get(f"{service_url}/v0/status", timeout=timeout)
+        elapsed = (datetime.now() - start).total_seconds() * 1000
+        return (response.status_code == 200, elapsed)
+    except Exception:
+        return (False, None)
+
+
+def _format_uptime(start_time: str) -> str:
+    if not start_time:
+        return "unknown"
+    try:
+        start = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+        now = datetime.now(start.tzinfo)
+        delta = now - start
+        hours = int(delta.total_seconds() // 3600)
+        minutes = int((delta.total_seconds() % 3600) // 60)
+        return f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+    except Exception:
+        return "unknown"
+
+
+def status(k3d: K3dWrapper) -> int:
+    """Show formatted cluster status. Returns 0=healthy, 1=degraded, 2=down."""
+    console = Console()
     cluster = k3d.info()
+
     if not cluster:
-        log(f"Cluster {k3d.cluster_name} not found", level="error")
-        return False
-    else:
-        log(f"Cluster {k3d.cluster_name} found", level="debug")
-        if cluster["serversRunning"] > 0:
-            log(
-                f"Cluster {k3d.cluster_name} is running with {cluster['serversRunning']} "
-                f"servers and {cluster['agentsRunning']} agents."
+        console.print(f"[red]✗[/red] Cluster [bold]{k3d.cluster_name}[/bold] not found")
+        return 2
+
+    if cluster["serversRunning"] == 0:
+        console.print(f"[red]✗[/red] Cluster [bold]{k3d.cluster_name}[/bold] is not running")
+        console.print("\n[dim]Start it with:[/dim] farmvibes-ai local start")
+        return 2
+
+    service_url = write_service_url(k3d.os_artifacts, cluster)
+
+    api_healthy, api_ms = _check_api_health(service_url) if service_url else (False, None)
+
+    kubectl = KubectlWrapper(k3d.os_artifacts, k3d.cluster_name)
+    try:
+        pod_statuses = kubectl.get_pod_status()
+    except Exception:
+        pod_statuses = []
+
+    total = len(pod_statuses)
+    running = sum(1 for p in pod_statuses if p["phase"] == "Running")
+    restarts = sum(p["restarts"] for p in pod_statuses)
+
+    console.print()
+    console.print(
+        f"[green]✓[/green] Cluster: [bold]{k3d.cluster_name}[/bold] "
+        f"({cluster['serversRunning']} server, {cluster['agentsRunning']} agents)"
+    )
+
+    if service_url:
+        if api_healthy:
+            console.print(
+                f"[green]✓[/green] API: {service_url} [dim]({api_ms:.0f}ms)[/dim]"
             )
-            service_url = write_service_url(k3d.os_artifacts, cluster)
-            if service_url:
-                log(f"Service url is {service_url}")
         else:
-            log(f"Cluster {k3d.cluster_name} is not running", level="warning")
-            return False
-        return True
+            console.print(f"[red]✗[/red] API: {service_url} [red](not responding)[/red]")
+    else:
+        console.print("[yellow]⚠[/yellow] API: [yellow]URL not available[/yellow]")
+
+    if total > 0:
+        svc_icon = "[green]✓[/green]" if running == total else "[yellow]⚠[/yellow]"
+        svc_color = "green" if running == total else "yellow"
+        console.print(
+            f"{svc_icon} Services: [{svc_color}]{running}/{total} running[/{svc_color}]"
+        )
+
+    if restarts > 0:
+        console.print(f"[yellow]⚠[/yellow] {restarts} restart(s) detected — check logs")
+
+    if pod_statuses:
+        console.print()
+        table = Table(show_header=True, header_style="bold", box=None)
+        table.add_column("Service", style="cyan", min_width=30)
+        table.add_column("State", min_width=12)
+        table.add_column("Uptime", style="dim", min_width=10)
+        table.add_column("Restarts", justify="right")
+
+        for pod in sorted(pod_statuses, key=lambda x: x["app"]):
+            if pod["phase"] == "Running":
+                state = "[green]Running[/green]"
+            elif pod["phase"] in ("Pending", "ContainerCreating"):
+                state = "[yellow]Pending[/yellow]"
+            else:
+                state = f"[red]{pod['phase']}[/red]"
+
+            restarts_str = (
+                f"[yellow]{pod['restarts']}[/yellow]" if pod["restarts"] > 0
+                else str(pod["restarts"])
+            )
+            table.add_row(pod["app"], state, _format_uptime(pod["start_time"]), restarts_str)
+
+        console.print(table)
+
+    console.print()
+
+    # Exit code: 0=healthy, 1=degraded, 2=down
+    if not api_healthy or running < total:
+        return 1
+    return 0
+
+
+def health(k3d: K3dWrapper) -> int:
+    """Health check: same output as status. Exit code 0=healthy, 1=degraded, 2=down."""
+    return status(k3d)
+
+
+def logs(
+    os_artifacts: OSArtifacts,
+    cluster_name: str,
+    service: str,
+    tail: Optional[int] = None,
+    since: Optional[str] = None,
+    follow: bool = True,
+) -> bool:
+    """Stream logs from a named service."""
+    console = Console()
+    k3d = K3dWrapper(os_artifacts, cluster_name)
+
+    if not k3d.cluster_exists():
+        console.print(f"[red]✗[/red] Cluster {cluster_name} does not exist")
+        return False
+
+    info = k3d.info()
+    if not info or info["serversRunning"] == 0:
+        console.print(f"[red]✗[/red] Cluster {cluster_name} is not running")
+        console.print("\n[dim]Start it with:[/dim] farmvibes-ai local start")
+        return False
+
+    kubectl = KubectlWrapper(os_artifacts, cluster_name)
+    try:
+        available = kubectl.get_services()
+    except Exception:
+        console.print("[red]✗[/red] Unable to list services")
+        return False
+
+    if service not in available:
+        console.print(f"[red]✗[/red] Service [bold]{service}[/bold] not found\n")
+        if available:
+            console.print("[bold]Available services:[/bold]")
+            for svc in sorted(available):
+                console.print(f"  • {svc}")
+        else:
+            console.print("[dim]No services found — is the cluster fully started?[/dim]")
+        console.print()
+        return False
+
+    with kubectl.context():
+        return kubectl.stream_logs(service, tail=tail, since=since, follow=follow)
 
 
 def start(k3d: K3dWrapper) -> bool:
@@ -632,7 +774,19 @@ def dispatch(args: argparse.Namespace):
     elif args.action == "restart":
         return restart(k3d)
     elif args.action in {"status", "url", "show-url"}:
+        # Returns int exit code (0=healthy, 1=degraded, 2=down)
         return status(k3d)
+    elif args.action == "health":
+        return health(k3d)
+    elif args.action == "logs":
+        return logs(
+            os_artifacts,
+            args.cluster_name,
+            args.service,
+            tail=getattr(args, "tail", None),
+            since=getattr(args, "since", None),
+            follow=not getattr(args, "no_follow", False),
+        )
     elif args.action in {"add-secret", "add_secret"}:
         return add_secret(os_artifacts, args.cluster_name, args.secret_name, args.secret_value)
     elif args.action in {"delete-secret", "delete_secret"}:
