@@ -279,10 +279,12 @@ def setup(
     is_update: bool = False,
     registry_port: int = REGISTRY_PORT,
 ) -> bool:
+    console = Console()
+
     if not is_update:
-        log("Setting up local cluster")
+        console.print("\n[bold cyan]Setting up local FarmVibes.AI cluster[/bold cyan]\n")
     else:
-        log("Updating local cluster")
+        console.print("\n[bold cyan]Updating local FarmVibes.AI cluster[/bold cyan]\n")
 
     if k3d.cluster_exists():
         if not is_update:
@@ -316,10 +318,13 @@ def setup(
         return False
 
     if not is_update:
-        log(f"Creating cluster {k3d.cluster_name}")
-        if not k3d.create(servers, agents, storage_path, registry_port, port, host):
-            log("Unable to create cluster", level="error")
-            return False
+        with console.status(f"[bold green]Creating k3d cluster '{k3d.cluster_name}'..."):
+            log(f"Creating cluster {k3d.cluster_name}")
+            if not k3d.create(servers, agents, storage_path, registry_port, port, host):
+                console.print("[red]✗ Failed to create cluster[/red]")
+                log("Unable to create cluster", level="error")
+                return False
+        console.print("[green]✓ Cluster created[/green]")
 
     az = None
     kubectl = KubectlWrapper(k3d.os_artifacts, k3d.cluster_name)
@@ -333,14 +338,16 @@ def setup(
         password = az.request_registry_token(registry)
 
     if password:
-        log(f"Creating Docker credentials for registry {registry}")
-        try:
-            kubectl.delete_secret("acrtoken")
-        except Exception:
-            pass
-        if not username:
-            username = "00000000-0000-0000-0000-000000000000"
-        kubectl.create_docker_token("acrtoken", registry, username, password)
+        with console.status("[bold green]Configuring registry credentials..."):
+            log(f"Creating Docker credentials for registry {registry}")
+            try:
+                kubectl.delete_secret("acrtoken")
+            except Exception:
+                pass
+            if not username:
+                username = "00000000-0000-0000-0000-000000000000"
+            kubectl.create_docker_token("acrtoken", registry, username, password)
+        console.print("[green]✓ Registry credentials configured[/green]")
     else:
         if registry.endswith(AZURE_CR_DOMAIN):
             log(
@@ -361,10 +368,13 @@ def setup(
     dapr_updated = False
     dapr = DaprWrapper(kubectl.os_artifacts, kubectl)
     if is_update and dapr.needs_upgrade():
-        log("Upgrading Dapr CRDs")
-        if not dapr.upgrade_crds():
-            log("Unable to upgrade Dapr CRDs", level="error")
-            return False
+        with console.status("[bold green]Upgrading Dapr CRDs..."):
+            log("Upgrading Dapr CRDs")
+            if not dapr.upgrade_crds():
+                console.print("[red]✗ Failed to upgrade Dapr CRDs[/red]")
+                log("Unable to upgrade Dapr CRDs", level="error")
+                return False
+        console.print("[green]✓ Dapr CRDs upgraded[/green]")
         dapr_updated = True
 
     # Pre-flight: verify required base images are accessible before running Terraform
@@ -373,21 +383,23 @@ def setup(
         return False
 
     terraform = TerraformWrapper(k3d.os_artifacts, az)
-    with terraform.workspace(f"farmvibes-k3d-{k3d.cluster_name}"):
-        terraform.ensure_local_cluster(
-            k3d.cluster_name,
-            registry,
-            log_level,
-            max_log_file_bytes,
-            log_backup_count,
-            image_tag,
-            image_prefix,
-            data_path,
-            worker_replicas,
-            kubectl.context_name,
-            enable_telemetry,
-            is_update=is_update,
-        )
+    with console.status("[bold green]Deploying services with Terraform (this may take a few minutes)..."):
+        with terraform.workspace(f"farmvibes-k3d-{k3d.cluster_name}"):
+            terraform.ensure_local_cluster(
+                k3d.cluster_name,
+                registry,
+                log_level,
+                max_log_file_bytes,
+                log_backup_count,
+                image_tag,
+                image_prefix,
+                data_path,
+                worker_replicas,
+                kubectl.context_name,
+                enable_telemetry,
+                is_update=is_update,
+            )
+    console.print("[green]✓ Services deployed[/green]")
     # We might have downloaded newer images, so we have to fix permissions
     docker = DockerWrapper(k3d.os_artifacts)
     try:
@@ -400,14 +412,17 @@ def setup(
         log("Unable to fix permissions on containerd image path", level="warning")
 
     if dapr_updated:
-        log("dapr upgraded, restarting services")
-        with kubectl.context(kubectl.cluster_name):
-            kubectl.restart("deployment", selectors=["backend=terravibes"])
-
-    log(f"Cluster {'update' if is_update else 'setup'} complete!")
+        with console.status("[bold green]Restarting services after Dapr upgrade..."):
+            log("dapr upgraded, restarting services")
+            with kubectl.context(kubectl.cluster_name):
+                kubectl.restart("deployment", selectors=["backend=terravibes"])
+        console.print("[green]✓ Services restarted[/green]")
 
     if not is_update:
-        restore_redis_data(kubectl, data_path)
+        with console.status("[bold green]Restoring workflow state..."):
+            restore_redis_data(kubectl, data_path)
+
+    console.print(f"\n[bold green]✓ Cluster {'update' if is_update else 'setup'} complete![/bold green]\n")
 
     status(k3d)
     with open(k3d.os_artifacts.config_dir / "storage", "w") as f:
