@@ -10,6 +10,14 @@ resource "helm_release" "rabbitmq" {
 
   set = [
     {
+      name  = "image.repository"
+      value = var.rabbitmq_image_repository
+    },
+    {
+      name  = "global.security.allowInsecureImages"
+      value = "true"
+    },
+    {
       name  = "image.tag"
       value = var.rabbitmq_image_tag
     },

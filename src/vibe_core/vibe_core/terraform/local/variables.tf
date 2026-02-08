@@ -47,7 +47,15 @@ variable "image_prefix" {
 variable "redis_image_tag" {
 }
 
+variable "redis_image_repository" {
+  default = "bitnamilegacy/redis"
+}
+
 variable "rabbitmq_image_tag" {
+}
+
+variable "rabbitmq_image_repository" {
+  default = "bitnamilegacy/rabbitmq"
 }
 
 variable "enable_telemetry" {
