@@ -21,6 +21,7 @@ from typing import (
 )
 from uuid import UUID, uuid4
 
+import aiohttp
 import debugpy
 import psutil
 import pydantic
@@ -32,6 +33,7 @@ from fastapi import Body, FastAPI, Path, Query, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from fastapi_versioning import VersionedFastAPI, version
+from starlette.middleware.base import BaseHTTPMiddleware
 from hydra_zen import instantiate
 from opentelemetry import trace
 from starlette.middleware.cors import CORSMiddleware
@@ -65,7 +67,12 @@ from vibe_core.datamodel import (
     RunStatus,
     SpatioTemporalJson,
 )
-from vibe_core.logconfig import LOG_BACKUP_COUNT, MAX_LOG_FILE_BYTES, configure_logging
+from vibe_core.logconfig import (
+    LOG_BACKUP_COUNT,
+    MAX_LOG_FILE_BYTES,
+    RequestContext,
+    configure_logging,
+)
 
 from .href_handler import BlobHrefHandler, HrefHandler, LocalHrefHandler
 from .workflow import get_workflow_path, workflow_from_input
@@ -109,6 +116,7 @@ RUN_CONFIG_SUBMISSION_EXAMPLE: Final[Dict[str, Any]] = {
     },
 }
 MOUNT_DIR: Final[str] = "/mnt"
+HEALTH_CHECK_TIMEOUT_S: Final[float] = 1.0
 RunList = Union[List[str], List[Dict[str, Any]], JSONResponse]
 WorkflowList = Union[List[str], Dict[str, Any], JSONResponse]
 CreateRunResponse = Union[Dict[str, Union[UUID, str]], JSONResponse]
@@ -179,6 +187,35 @@ class TerravibesProvider:
             total_mem=mem.total,
             disk_free=df,
         )
+
+    async def health_check(self) -> Dict[str, Any]:
+        """Probe Dapr sidecar, state store, and pubsub. Returns status dict."""
+        host = settings.DAPR_RUNTIME_HOST
+        port = settings.DAPR_HTTP_PORT
+        base = f"http://{host}:{port}"
+
+        checks: Dict[str, str] = {}
+
+        async def _probe(name: str, url: str, ok_statuses: tuple) -> None:
+            try:
+                timeout = aiohttp.ClientTimeout(total=HEALTH_CHECK_TIMEOUT_S)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url) as resp:
+                        if resp.status in ok_statuses:
+                            checks[name] = "ok"
+                        else:
+                            checks[name] = f"error: HTTP {resp.status}"
+            except Exception as exc:
+                checks[name] = f"error: {exc}"
+
+        await asyncio.gather(
+            _probe("dapr", f"{base}/v1.0/healthz", (200,)),
+            _probe("state_store", f"{base}/v1.0/state/statestore/health-probe", (200, 404)),
+            _probe("pubsub", f"{base}/v1.0/healthz/outbound", (200,)),
+        )
+
+        overall = "healthy" if all(v == "ok" for v in checks.values()) else "degraded"
+        return {"status": overall, "checks": checks}
 
     async def root(self) -> Message:
         return Message(message="REST API server is running")
@@ -530,6 +567,30 @@ class TerravibesProvider:
             self.logger.debug(f"Successfully posted workflow message for run {new_run.id}")
 
 
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Generates a request ID, injects it into log context, logs one line per request."""
+
+    _logger = logging.getLogger(__name__ + ".RequestLoggingMiddleware")
+
+    async def dispatch(self, request: Any, call_next: Any) -> Any:
+        request_id = str(uuid4())
+        path = request.url.path
+        start = datetime.utcnow()
+        RequestContext.set(request_id, path, "")
+        try:
+            response = await call_next(request)
+        finally:
+            duration_ms = str(int((datetime.utcnow() - start).total_seconds() * 1000))
+            RequestContext.set(request_id, path, duration_ms)
+            self._logger.info(
+                f"method={request.method} path={path} "
+                f"status={getattr(response, 'status_code', '?')} "
+                f"duration_ms={duration_ms} request_id={request_id}"
+            )
+            RequestContext.clear()
+        return response
+
+
 class TerravibesAPI(FastAPI):
     uvicorn_config: uvicorn.Config
     terravibes: TerravibesProvider
@@ -636,6 +697,39 @@ class TerravibesAPI(FastAPI):
         async def terravibes_metrics() -> MetricsDict:
             """Get system metrics, including CPU usage, memory usage, and storage disk space."""
             return self.terravibes.system_metrics()
+
+        @self.get("/liveness")
+        @version(0)
+        async def terravibes_liveness() -> Dict[str, str]:
+            """Kubernetes liveness probe. Always returns 200 if the process is alive."""
+            return {"status": "alive"}
+
+        async def _health_response() -> JSONResponse:
+            result = await self.terravibes.health_check()
+            http_status = (
+                status.HTTP_200_OK
+                if result["status"] == "healthy"
+                else status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+            return JSONResponse(status_code=http_status, content=result)
+
+        @self.get("/readiness")
+        @version(0)
+        async def terravibes_readiness() -> JSONResponse:
+            """Kubernetes readiness probe. Returns 503 if any dependency is down."""
+            return await _health_response()
+
+        @self.get("/health")
+        @version(0)
+        async def terravibes_health() -> JSONResponse:
+            """Full dependency health report."""
+            return await _health_response()
+
+        @self.get("/status")
+        @version(0)
+        async def terravibes_status() -> JSONResponse:
+            """Health summary (CLI-compatible alias for /health)."""
+            return await _health_response()
 
         @self.get("/workflows", tags=["workflows"], response_model=None)
         @version(0)
@@ -754,6 +848,7 @@ class TerravibesAPI(FastAPI):
             allow_methods=["*"],
             allow_headers=["*"],
         )
+        self.versioned_wrapper.add_middleware(RequestLoggingMiddleware)
         self.uvicorn_config = uvicorn.Config(
             app=self.versioned_wrapper,
             host=host,
