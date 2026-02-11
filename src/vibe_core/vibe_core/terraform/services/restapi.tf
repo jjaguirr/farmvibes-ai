@@ -79,6 +79,22 @@ resource "kubernetes_deployment" "restapi" {
           port {
             container_port = 3000
           }
+          liveness_probe {
+            http_get {
+              path = "/v0/liveness"
+              port = 3000
+            }
+            initial_delay_seconds = 15
+            failure_threshold     = 3
+          }
+          readiness_probe {
+            http_get {
+              path = "/v0/readiness"
+              port = 3000
+            }
+            initial_delay_seconds = 20
+            failure_threshold     = 3
+          }
           working_dir = var.working_dir
           security_context {
             run_as_user  = var.run_as_user_id
