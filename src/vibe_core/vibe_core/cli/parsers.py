@@ -5,9 +5,9 @@ import argparse
 import getpass
 import os
 from abc import ABC, abstractmethod
-from multiprocessing import cpu_count
 from typing import Dict, List
 
+from .config import get_config as _get_config
 from .constants import (
     DEFAULT_IMAGE_PREFIX,
     DEFAULT_IMAGE_TAG,
@@ -31,7 +31,7 @@ from .help_descriptions import (
 )
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 31108
+DEFAULT_PORT = _get_config().port
 AZURERM_ENVIRONMENTS = [
     "public",
     "usgovernment",
@@ -195,7 +195,7 @@ class LocalCliParser(CliParser):
             command.add_argument(
                 "--worker-replicas",
                 type=int,
-                default=max(1, cpu_count() // 2 - 1),
+                default=_get_config().worker_replicas,
                 help="Number of worker replicas to use",
             )
             command.add_argument(
@@ -213,7 +213,7 @@ class LocalCliParser(CliParser):
             command.add_argument(
                 "--registry-port",
                 type=int,
-                default=5000,
+                default=_get_config().registry_port,
                 help="Port to use for registry on host",
             )
 

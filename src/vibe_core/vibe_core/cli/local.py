@@ -12,6 +12,8 @@ import requests
 from rich.console import Console
 from rich.table import Table
 
+from pydantic import ValidationError
+from vibe_core.cli.config import get_config as _get_config, load_and_validate_config
 from vibe_core.cli.constants import (
     AZURE_CR_DOMAIN,
     DEFAULT_IMAGE_PREFIX,
@@ -46,8 +48,8 @@ DEFAULT_STORAGE_PATH = os.environ.get(
 DATA_SUFFIX = "data"
 REDIS_DUMP = "redis-dump.rdb"
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 31108
-REGISTRY_PORT = 5000
+DEFAULT_PORT = _get_config().port
+REGISTRY_PORT = _get_config().registry_port
 OLD_DEFAULT_CLUSTER_NAME = "farmvibes-ai"
 
 
@@ -239,9 +241,10 @@ def check_disk_space(storage_path: str, space_in_gb: int = 30) -> bool:
 
 def check_images_accessible(docker: DockerWrapper) -> bool:
     """Pre-flight: verify base images are reachable before deploying."""
+    cfg = _get_config()
     images = [
-        f"{REDIS_IMAGE_REPOSITORY}:{REDIS_IMAGE_TAG}",
-        f"{RABBITMQ_IMAGE_REPOSITORY}:{RABBITMQ_IMAGE_TAG}",
+        f"{cfg.redis_image_repository}:{cfg.redis_image_tag}",
+        f"{cfg.rabbitmq_image_repository}:{cfg.rabbitmq_image_tag}",
     ]
     for image in images:
         log(f"Checking image availability: {image}")
@@ -251,7 +254,7 @@ def check_images_accessible(docker: DockerWrapper) -> bool:
             log(
                 f"Cannot access image '{image}'. "
                 "Verify that the image tag exists in the repository "
-                f"and that the registry is reachable. "
+                "and that the registry is reachable. "
                 f"Run `docker manifest inspect {image}` to diagnose.",
                 level="error",
             )
@@ -737,6 +740,12 @@ def add_onnx(cluster_name: str, storage_path: str, onnx: str):
 
 
 def dispatch(args: argparse.Namespace):
+    try:
+        load_and_validate_config()
+    except ValidationError as e:
+        log(f"Configuration error:\n{e}", level="error")
+        return False
+
     os_artifacts = OSArtifacts()
     os_artifacts.check_dependencies(InstallType.LOCAL)
 

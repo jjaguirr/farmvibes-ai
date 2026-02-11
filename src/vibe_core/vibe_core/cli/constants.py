@@ -1,20 +1,28 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
+#
+# These module-level names are preserved for backward compatibility.
+# The canonical source of truth is vibe_core.cli.config.FarmVibesConfig —
+# change values there (or via FARMVIBES_AI_* env vars), not here.
 
-DEFAULT_IMAGE_PREFIX = "farmai/terravibes/"
-DEFAULT_IMAGE_TAG = "12088305617"
-DEFAULT_REGISTRY_PATH = "mcr.microsoft.com"
+from .config import get_config as _get_config
+
+_cfg = _get_config()
+
+DEFAULT_IMAGE_PREFIX = _cfg.image_prefix
+DEFAULT_IMAGE_TAG = _cfg.image_tag
+DEFAULT_REGISTRY_PATH = _cfg.registry
 
 LOCAL_SERVICE_URL_PATH_FILE = "service_url"
 REMOTE_SERVICE_URL_PATH_FILE = "remote_service_url"
-MAX_WORKER_NODES = 3
+MAX_WORKER_NODES = _cfg.max_worker_nodes
 
 AZURE_CR_DOMAIN = "azurecr.io"
 
-# Local constants
+# Local cluster constants
 ONNX_SUBDIR = "onnx_resources"
-FARMVIBES_AI_LOG_LEVEL = "DEBUG"
-REDIS_IMAGE_REPOSITORY = "bitnamilegacy/redis"
-REDIS_IMAGE_TAG = "7.4.1-debian-12-r2"
-RABBITMQ_IMAGE_REPOSITORY = "bitnamilegacy/rabbitmq"
-RABBITMQ_IMAGE_TAG = "4.0.4-debian-12-r1"
+FARMVIBES_AI_LOG_LEVEL = _cfg.log_level
+REDIS_IMAGE_REPOSITORY = _cfg.redis_image_repository
+REDIS_IMAGE_TAG = _cfg.redis_image_tag
+RABBITMQ_IMAGE_REPOSITORY = _cfg.rabbitmq_image_repository
+RABBITMQ_IMAGE_TAG = _cfg.rabbitmq_image_tag
