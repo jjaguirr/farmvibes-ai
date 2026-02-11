@@ -1797,6 +1797,16 @@ class DockerWrapper:
             subprocess_log_level="debug",
         )
 
+    def image_inspect(self, image: str) -> str:
+        """Check if an image exists in the local Docker cache."""
+        cmd = [self.os_artifacts.docker, "image", "inspect", image]
+        return execute_cmd(
+            cmd,
+            error_string=f"Image not found locally: {image}",
+            capture_output=True,
+            subprocess_log_level="debug",
+        )
+
     def exec(self, container_name: str, command: List[str]):
         cmd = [self.os_artifacts.docker, "exec", "-it", container_name] + command
         result = execute_cmd(

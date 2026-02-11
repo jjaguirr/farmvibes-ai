@@ -248,14 +248,19 @@ def check_images_accessible(docker: DockerWrapper) -> bool:
         try:
             docker.manifest_inspect(image)
         except Exception:
-            log(
-                f"Cannot access image '{image}'. "
-                "Verify that the image tag exists in the repository "
-                f"and that the registry is reachable. "
-                f"Run `docker manifest inspect {image}` to diagnose.",
-                level="error",
-            )
-            return False
+            # Remote manifest check failed; fall back to local Docker cache.
+            try:
+                docker.image_inspect(image)
+                log(f"Image '{image}' found in local cache.")
+            except Exception:
+                log(
+                    f"Cannot access image '{image}'. "
+                    "Verify that the image tag exists in the repository "
+                    f"and that the registry is reachable. "
+                    f"Run `docker manifest inspect {image}` to diagnose.",
+                    level="error",
+                )
+                return False
     return True
 
 
