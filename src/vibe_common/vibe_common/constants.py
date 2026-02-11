@@ -2,14 +2,13 @@
 # Licensed under the MIT License.
 
 import os
-from typing import Dict, Final, List, Tuple, cast
-
-from dapr.conf import settings
-
-from vibe_core.cli.local import DATA_SUFFIX
+from typing import Dict, Final, List, Tuple
 
 HeaderDict = Dict[str, str]
 WorkReply = Tuple[str, int, HeaderDict]
+
+# Defined here directly to remove the import from vibe_core.cli.local.
+DATA_SUFFIX: Final[str] = "data"
 
 DEFAULT_STORE_PATH: Final[str] = os.environ.get(
     "DEFAULT_STORE_PATH", os.path.join("/mnt", DATA_SUFFIX)
@@ -48,22 +47,9 @@ TRACEPARENT_HEADER_KEY: Final[str] = "Traceparent"
 WORKFLOW_ARTIFACTS_PUBSUB_TOPIC: Final[str] = "workflow-artifacts-commands"
 WORKFLOW_REQUEST_PUBSUB_TOPIC: Final[str] = "workflow_execution_request"
 STATE_URL_PATH = "/v1.0/state"
-STATE_URL_TEMPLATE: Final[str] = (
-    f"http://{settings.DAPR_RUNTIME_HOST}:{settings.DAPR_HTTP_PORT}{STATE_URL_PATH}" "/{}/{}"
-)
+
 PUBSUB_URL_TEMPLATE: Final[str] = "http://{}:{}/v1.0/publish/{}/{}"
-PUBSUB_WORKFLOW_URL: Final[str] = PUBSUB_URL_TEMPLATE.format(
-    cast(str, settings.DAPR_RUNTIME_HOST),
-    cast(str, settings.DAPR_HTTP_PORT),
-    CONTROL_STATUS_PUBSUB,
-    WORKFLOW_REQUEST_PUBSUB_TOPIC,
-)
 SERVICE_INVOCACATION_URL_PATH = "/v1.0/invoke"
-DATA_OPS_INVOKE_URL_TEMPLATE: Final[str] = (
-    f"http://{settings.DAPR_RUNTIME_HOST}:{settings.DAPR_HTTP_PORT}"
-    f"{SERVICE_INVOCACATION_URL_PATH}/terravibes-data-ops/method/"
-    "{}/{}"
-)
 
 RUNS_KEY: Final[str] = "runs"
 ALLOWED_ORIGINS: Final[List[str]] = [
@@ -84,3 +70,37 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OPS_DIR = os.path.abspath(os.path.join(HERE, "..", "..", "..", "ops"))
 if not os.path.exists(DEFAULT_OPS_DIR):
     DEFAULT_OPS_DIR = os.path.join("/", "app", "ops")
+
+# ---------------------------------------------------------------------------
+# Dapr-dependent URL templates — computed lazily on first access so that
+# importing vibe_common.constants does not require a running Dapr sidecar.
+# All three are cached in the module dict after the first access.
+# ---------------------------------------------------------------------------
+
+_DAPR_LAZY: Final[frozenset] = frozenset(
+    {"STATE_URL_TEMPLATE", "PUBSUB_WORKFLOW_URL", "DATA_OPS_INVOKE_URL_TEMPLATE"}
+)
+
+
+def __getattr__(name: str) -> str:
+    if name in _DAPR_LAZY:
+        from dapr.conf import settings  # type: ignore[import]
+
+        host = str(settings.DAPR_RUNTIME_HOST)
+        port = str(settings.DAPR_HTTP_PORT)
+        vals = {
+            "STATE_URL_TEMPLATE": (
+                f"http://{host}:{port}{STATE_URL_PATH}" + "/{}/{}"
+            ),
+            "PUBSUB_WORKFLOW_URL": PUBSUB_URL_TEMPLATE.format(
+                host, port, CONTROL_STATUS_PUBSUB, WORKFLOW_REQUEST_PUBSUB_TOPIC
+            ),
+            "DATA_OPS_INVOKE_URL_TEMPLATE": (
+                f"http://{host}:{port}{SERVICE_INVOCACATION_URL_PATH}"
+                "/terravibes-data-ops/method/{}/{}"
+            ),
+        }
+        # Cache all three so future accesses hit __dict__ directly.
+        globals().update(vals)
+        return vals[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

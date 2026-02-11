@@ -49,6 +49,7 @@ dependencies = [
     "hydra-zen~=0.10",
     "rich~=13.7.1",
     "msal==1.22.0",
+    "PyYAML>=5.4",
 ]
 
 [project.urls]

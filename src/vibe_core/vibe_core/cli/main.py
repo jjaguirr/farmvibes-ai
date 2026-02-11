@@ -11,11 +11,17 @@ from .local import dispatch as dispatch_local
 from .logging import log
 from .parsers import LocalCliParser, RemoteCliParser
 from .remote import dispatch as dispatch_remote
+from .workflow import WorkflowCliParser
+from .workflow import dispatch as dispatch_workflow
 
 
 def main():
     parser = argparse.ArgumentParser(description="FarmVibes.AI cluster deployment tool")
-    parser.add_argument("cluster_type", choices=["remote", "local"], help="Cluster type to manage")
+    parser.add_argument(
+        "cluster_type",
+        choices=["remote", "local", "workflow"],
+        help="Cluster type to manage, or 'workflow' for workflow tooling",
+    )
     parser.add_argument("-v", "--verbose", help="Increase output verbosity", action="store_true")
     parser.add_argument(
         "--auto-confirm", required=False, help="Answer every question as yes", action="store_true"
@@ -42,6 +48,15 @@ def main():
 
     # Determine the type of cluster we have
     # Given that, build the subparsers for that cluster type
+    if args.cluster_type == "workflow":
+        wf_parser = WorkflowCliParser()
+        wf_args = wf_parser.parse(unknown_args)
+        try:
+            result = dispatch_workflow(wf_args)
+            sys.exit(result if isinstance(result, int) else (0 if result is not False else 1))
+        except KeyboardInterrupt:
+            sys.exit(1)
+
     if args.cluster_type == "remote":
         parser = RemoteCliParser("remote")
         dispatcher = dispatch_remote
