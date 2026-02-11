@@ -20,6 +20,8 @@ from .help_descriptions import (
     ADD_SECRET_HELP,
     DELETE_SECRET_HELP,
     DESTROY_HELP,
+    HEALTH_HELP,
+    LOGS_HELP,
     RESTART_HELP,
     SETUP_HELP,
     START_HELP,
@@ -52,6 +54,8 @@ class CliParser(ABC):
         ("stop", STOP_HELP, ["down", "halt"]),
         ("restart", RESTART_HELP, ["reboot", "reload"]),
         ("status", STATUS_HELP, ["info", "show", "url", "show-url"]),
+        ("health", HEALTH_HELP, []),
+        ("logs", LOGS_HELP, []),
         ("add-secret", ADD_SECRET_HELP, ["add_secret"]),
         ("delete-secret", DELETE_SECRET_HELP, ["delete_secret"]),
         ("add-onnx", ADD_ONNX_HELP, ["add_onnx", "add-model"]),
@@ -89,11 +93,20 @@ class CliParser(ABC):
 
     def _add_flags(self):
         self._add_setup_update_flags()
-        # destroy doesn't need any flags
-        # start doesn't need any flags
-        # stop doesn't need any flags
-        # restart doesn't need any flags
-        # status doesn't need any flags
+        # destroy/start/stop/restart/status/health don't need extra flags
+
+        self.commands["logs"].add_argument("service", help="Service name to stream logs from")
+        self.commands["logs"].add_argument(
+            "--tail", type=int, default=None, help="Show last N lines"
+        )
+        self.commands["logs"].add_argument(
+            "--since", type=str, default=None, help="Show logs since duration (e.g. 1h, 30m)"
+        )
+        self.commands["logs"].add_argument(
+            "--no-follow", action="store_true", default=False,
+            help="Dump logs and exit instead of following"
+        )
+
         for secret in (self.commands["add-secret"], self.commands["delete-secret"]):
             secret.add_argument(
                 "secret_name",
