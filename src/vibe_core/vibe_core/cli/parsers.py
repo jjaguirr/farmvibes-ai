@@ -5,16 +5,9 @@ import argparse
 import getpass
 import os
 from abc import ABC, abstractmethod
-from multiprocessing import cpu_count
 from typing import Dict, List
 
-from .constants import (
-    DEFAULT_IMAGE_PREFIX,
-    DEFAULT_IMAGE_TAG,
-    DEFAULT_REGISTRY_PATH,
-    FARMVIBES_AI_LOG_LEVEL,
-    MAX_WORKER_NODES,
-)
+from .config import load_config as _load_config
 from .help_descriptions import (
     ADD_ONNX_HELP,
     ADD_SECRET_HELP,
@@ -30,8 +23,10 @@ from .help_descriptions import (
     UPDATE_HELP,
 )
 
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 31108
+_cfg = _load_config()
+
+DEFAULT_HOST = _cfg.host
+DEFAULT_PORT = _cfg.port
 AZURERM_ENVIRONMENTS = [
     "public",
     "usgovernment",
@@ -156,7 +151,7 @@ class LocalCliParser(CliParser):
             command.add_argument(
                 "--registry",
                 type=str,
-                default=DEFAULT_REGISTRY_PATH.split("/")[0],
+                default=_cfg.image_registry.split("/")[0],
                 help="Registry to use for images",
             )
             command.add_argument(
@@ -166,18 +161,18 @@ class LocalCliParser(CliParser):
                 "--registry-password", type=str, default="", help="Password for registry"
             )
             command.add_argument(
-                "--image-tag", type=str, default=DEFAULT_IMAGE_TAG, help="Image tag to use"
+                "--image-tag", type=str, default=_cfg.image_tag, help="Image tag to use"
             )
             command.add_argument(
                 "--image-prefix",
                 type=str,
-                default=DEFAULT_IMAGE_PREFIX,
+                default=_cfg.image_prefix,
                 help="Prefix to use for images",
             )
             command.add_argument(
                 "--log-level",
                 type=str,
-                default=FARMVIBES_AI_LOG_LEVEL,
+                default=_cfg.log_level,
                 help="Log level to use for FarmVibes.AI services",
             )
             command.add_argument(
@@ -195,7 +190,7 @@ class LocalCliParser(CliParser):
             command.add_argument(
                 "--worker-replicas",
                 type=int,
-                default=max(1, cpu_count() // 2 - 1),
+                default=_cfg.worker_replicas,
                 help="Number of worker replicas to use",
             )
             command.add_argument(
@@ -213,7 +208,7 @@ class LocalCliParser(CliParser):
             command.add_argument(
                 "--registry-port",
                 type=int,
-                default=5000,
+                default=_cfg.registry_port,
                 help="Port to use for registry on host",
             )
 
@@ -298,7 +293,7 @@ class RemoteCliParser(CliParser):
             command.add_argument(
                 "--registry",
                 required=False,
-                default=DEFAULT_REGISTRY_PATH,
+                default=_cfg.image_registry,
                 help="Registry to overwrite where to pull images from",
             )
             command.add_argument(
@@ -311,13 +306,13 @@ class RemoteCliParser(CliParser):
                 "--image-prefix",
                 required=False,
                 help="Prefix for the image names in the registry",
-                default=DEFAULT_IMAGE_PREFIX,
+                default=_cfg.image_prefix,
             )
             command.add_argument(
                 "--image-tag",
                 required=False,
                 help="Image tags for the images in the registry",
-                default=DEFAULT_IMAGE_TAG,
+                default=_cfg.image_tag,
             )
             command.add_argument(
                 "--cert-email", required=True, help="Email for the certificate issuing authority"
@@ -334,7 +329,7 @@ class RemoteCliParser(CliParser):
                 "--max-worker-nodes",
                 required=False,
                 help="Maximum number of (VMs) that support worker nodes",
-                default=MAX_WORKER_NODES,
+                default=_cfg.max_worker_nodes,
                 type=int,
             )
             command.add_argument(
