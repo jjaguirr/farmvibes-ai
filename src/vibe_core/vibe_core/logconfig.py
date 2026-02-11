@@ -7,10 +7,11 @@ import json
 import logging
 import logging.handlers
 import os
+from contextvars import ContextVar
 from logging import Filter, LogRecord, getLogger
 from logging.handlers import RotatingFileHandler
 from platform import node
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 LOG_FORMAT = "[%(asctime)s] [%(hostname)s] %(levelname)s [%(name)s:%(lineno)s] %(message)s"
 """The default log format."""
@@ -18,7 +19,8 @@ LOG_FORMAT = "[%(asctime)s] [%(hostname)s] %(levelname)s [%(name)s:%(lineno)s] %
 JSON_FORMAT = (
     '{"app_id": "%(app)s", "instance": "%(hostname)s", "level": "%(levelname)s", '
     '"msg": %(json_message)s, "scope": "%(name)s", "time": "%(asctime)s", "type": "log", '
-    '"ver": "dev"}'
+    '"ver": "dev", "request_id": "%(request_id)s", "path": "%(request_path)s", '
+    '"duration_ms": "%(duration_ms)s"}'
 )
 """JSON log format."""
 
@@ -105,6 +107,35 @@ class JsonMessageFilter(Filter):
         return True
 
 
+# ContextVar holding (request_id, request_path, duration_ms); empty strings when unset.
+_REQUEST_CONTEXT: ContextVar[Tuple[str, str, str]] = ContextVar(
+    "_REQUEST_CONTEXT", default=("", "", "")
+)
+
+
+class RequestContext:
+    """Namespace for setting and clearing per-request log context."""
+
+    @staticmethod
+    def set(request_id: str, path: str, duration_ms: str) -> None:
+        _REQUEST_CONTEXT.set((request_id, path, duration_ms))
+
+    @staticmethod
+    def clear() -> None:
+        _REQUEST_CONTEXT.set(("", "", ""))
+
+
+class RequestContextFilter(Filter):
+    """Injects request_id, request_path, and duration_ms from ContextVar into log records."""
+
+    def filter(self, record: LogRecord) -> bool:
+        request_id, path, duration_ms = _REQUEST_CONTEXT.get()
+        record.request_id = request_id
+        record.request_path = path
+        record.duration_ms = duration_ms
+        return True
+
+
 def change_logger_level(loggername: str, level: str):
     """Set the default log level for a logger.
 
@@ -163,6 +194,7 @@ def configure_logging(
         handler.addFilter(AppFilter(appname))
         handler.addFilter(HostnameFilter())
         handler.addFilter(JsonMessageFilter())
+        handler.addFilter(RequestContextFilter())
         handler.setFormatter(logging.Formatter(JSON_FORMAT if json else LOG_FORMAT))
         logger.addHandler(handler)
 
