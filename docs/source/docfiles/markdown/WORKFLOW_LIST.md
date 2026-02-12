@@ -160,6 +160,8 @@ Below is a list of all available workflows within the FarmVibes.AI platform. For
 
 - [`agriculture/ndvi_summary` 📄](workflow_yaml/farm_ai/agriculture/ndvi_summary.md): Calculates NDVI statistics (mean, standard deviation, maximum and minimum) for the input geometry and time range.
 
+- [`agriculture/ndvi_anomaly_detection` 📄](workflow_yaml/farm_ai/agriculture/ndvi_anomaly_detection.md): Detects NDVI anomalies by comparing vegetation indices between a baseline period and a comparison period.
+
 - [`agriculture/weed_detection` 📄](workflow_yaml/farm_ai/agriculture/weed_detection.md): Generates shape files for similarly colored regions in the input raster.
 
 - [`carbon_local/admag_carbon_integration` 📄](workflow_yaml/farm_ai/carbon_local/admag_carbon_integration.md): Computes the offset amount of carbon that would be sequestered in a seasonal field using Microsoft Azure Data Manager for Agriculture (ADMAg) data.
