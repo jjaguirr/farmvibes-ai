@@ -15,7 +15,11 @@ from .remote import dispatch as dispatch_remote
 
 def main():
     parser = argparse.ArgumentParser(description="FarmVibes.AI cluster deployment tool")
-    parser.add_argument("cluster_type", choices=["remote", "local"], help="Cluster type to manage")
+    parser.add_argument(
+        "cluster_type",
+        choices=["remote", "local", "workflow"],
+        help="Cluster type to manage, or 'workflow' for workflow development tools",
+    )
     parser.add_argument("-v", "--verbose", help="Increase output verbosity", action="store_true")
     parser.add_argument(
         "--auto-confirm", required=False, help="Answer every question as yes", action="store_true"
@@ -39,6 +43,11 @@ def main():
 
     if args.auto_confirm:
         set_auto_confirm()
+
+    # workflow subcommand: no cluster needed, dispatch directly
+    if args.cluster_type == "workflow":
+        from .workflow import dispatch as dispatch_workflow
+        sys.exit(dispatch_workflow(unknown_args))
 
     # Determine the type of cluster we have
     # Given that, build the subparsers for that cluster type

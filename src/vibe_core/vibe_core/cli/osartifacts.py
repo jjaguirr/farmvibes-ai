@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, NamedTuple, Optional
 
-import pkg_resources
+import importlib.resources
+
 import requests
 
 from .helper import execute_cmd
@@ -368,7 +369,7 @@ class OSArtifacts:
     @property
     def terraform_base(self) -> str:
         terraform_dir = os.path.abspath(
-            pkg_resources.resource_filename(__name__, os.path.join("..", "terraform"))
+            str(importlib.resources.files("vibe_core").joinpath("terraform"))
         )
         return terraform_dir
 
