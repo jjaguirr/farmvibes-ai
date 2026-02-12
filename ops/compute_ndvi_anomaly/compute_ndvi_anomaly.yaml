@@ -1,0 +1,39 @@
+name: compute_ndvi_anomaly
+inputs:
+  baseline_rasters: List[Raster]
+  comparison_rasters: List[Raster]
+output:
+  change_map: Raster
+  anomaly_mask: CategoricalRaster
+  summary: TimeSeries
+parameters:
+  threshold: -0.1
+entrypoint:
+  file: compute_ndvi_anomaly.py
+  callback_builder: CallbackBuilder
+dependencies:
+  parameters:
+    - threshold
+description:
+  short_description: >-
+    Computes per-pixel NDVI change between a baseline and a comparison period and flags anomalous
+    zones where the decline exceeds a threshold.
+  long_description: >-
+    The operation computes the temporal mean NDVI for the baseline and comparison periods separately,
+    then subtracts baseline from comparison to produce a per-pixel change map. Pixels where the
+    change is more negative than the threshold are flagged as anomalous. Summary statistics
+    (mean change, std, min, max, anomaly fraction, and period means) are aggregated into a
+    time series.
+  inputs:
+    baseline_rasters: NDVI rasters from the baseline period.
+    comparison_rasters: NDVI rasters from the comparison period.
+  output:
+    change_map: Per-pixel NDVI change raster (comparison mean minus baseline mean).
+    anomaly_mask: >-
+      Binary categorical raster flagging pixels where NDVI decline exceeds the threshold
+      (0 = normal, 1 = anomaly).
+    summary: Time series of summary statistics for the NDVI change.
+  parameters:
+    threshold: >-
+      NDVI change threshold below which a pixel is flagged as anomalous. Negative values indicate
+      vegetation decline (default -0.1).

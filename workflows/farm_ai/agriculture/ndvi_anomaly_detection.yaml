@@ -1,0 +1,76 @@
+name: ndvi_anomaly_detection
+sources:
+  baseline_input:
+    - s2_baseline.user_input
+  comparison_input:
+    - s2_comparison.user_input
+sinks:
+  change_map: ndvi_anomaly.change_map
+  anomaly_mask: ndvi_anomaly.anomaly_mask
+  summary: ndvi_anomaly.summary
+parameters:
+  threshold: -0.1
+  pc_key:
+tasks:
+  s2_baseline:
+    workflow: data_ingestion/sentinel2/preprocess_s2_improved_masks
+    parameters:
+      max_tiles_per_time: 1
+      pc_key: "@from(pc_key)"
+  compute_ndvi_baseline:
+    workflow: data_processing/index/index
+  s2_comparison:
+    workflow: data_ingestion/sentinel2/preprocess_s2_improved_masks
+    parameters:
+      max_tiles_per_time: 1
+      pc_key: "@from(pc_key)"
+  compute_ndvi_comparison:
+    workflow: data_processing/index/index
+  ndvi_anomaly:
+    op: compute_ndvi_anomaly
+    parameters:
+      threshold: "@from(threshold)"
+edges:
+  - origin: s2_baseline.raster
+    destination:
+      - compute_ndvi_baseline.raster
+  - origin: compute_ndvi_baseline.index_raster
+    destination:
+      - ndvi_anomaly.baseline_rasters
+  - origin: s2_comparison.raster
+    destination:
+      - compute_ndvi_comparison.raster
+  - origin: compute_ndvi_comparison.index_raster
+    destination:
+      - ndvi_anomaly.comparison_rasters
+description:
+  short_description: >-
+    Detects NDVI anomalies by comparing vegetation index values between a baseline and a comparison
+    period over the same field boundary.
+  long_description: >-
+    The workflow downloads and preprocesses Sentinel-2 imagery for two independent time windows
+    (baseline and comparison) using improved cloud masks. NDVI is computed for each acquisition in
+    both periods. The compute_ndvi_anomaly operation then calculates the temporal mean NDVI for
+    each period, produces a per-pixel change map (comparison minus baseline), and flags zones where
+    the decline exceeds the configured threshold. Outputs include a change GeoTIFF, a binary anomaly
+    mask, and a summary statistics time series.
+  sources:
+    baseline_input: Time range and geometry of interest for the baseline period.
+    comparison_input: >-
+      Time range and geometry of interest for the comparison period. The geometry should match
+      the baseline geometry.
+  sinks:
+    change_map: >-
+      Per-pixel NDVI change raster (comparison mean minus baseline mean). Negative values indicate
+      vegetation decline.
+    anomaly_mask: >-
+      Binary categorical raster where 1 indicates pixels whose NDVI decline exceeds the threshold
+      (anomalous zones) and 0 indicates normal vegetation.
+    summary: >-
+      Time series of summary statistics including mean change, standard deviation, min, max,
+      anomaly fraction, and mean NDVI for each period.
+  parameters:
+    threshold: >-
+      NDVI change value below which a pixel is flagged as anomalous. Should be negative to detect
+      vegetation decline (default -0.1, meaning a 10-point NDVI drop).
+    pc_key: Optional Planetary Computer API key.
