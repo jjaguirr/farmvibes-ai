@@ -1,0 +1,96 @@
+name: ndvi_anomaly_detection
+sources:
+  baseline_input:
+    - baseline_s2.user_input
+    - anomaly.input_geometry
+  comparison_input:
+    - comparison_s2.user_input
+sinks:
+  change_raster: anomaly.change_raster
+  anomaly_raster: anomaly.anomaly_raster
+  summary: anomaly.summary
+  baseline_ndvi: baseline_ndvi.index_raster
+  comparison_ndvi: comparison_ndvi.index_raster
+parameters:
+  pc_key:
+  threshold:
+tasks:
+  baseline_s2:
+    workflow: data_ingestion/sentinel2/preprocess_s2_improved_masks
+    parameters:
+      max_tiles_per_time: 1
+      pc_key: "@from(pc_key)"
+  baseline_ndvi:
+    workflow: data_processing/index/index
+    parameters:
+      index: ndvi
+  comparison_s2:
+    workflow: data_ingestion/sentinel2/preprocess_s2_improved_masks
+    parameters:
+      max_tiles_per_time: 1
+      pc_key: "@from(pc_key)"
+  comparison_ndvi:
+    workflow: data_processing/index/index
+    parameters:
+      index: ndvi
+  anomaly:
+    op: compute_ndvi_anomaly
+    parameters:
+      threshold: "@from(threshold)"
+edges:
+  - origin: baseline_s2.raster
+    destination:
+      - baseline_ndvi.raster
+  - origin: comparison_s2.raster
+    destination:
+      - comparison_ndvi.raster
+  - origin: baseline_ndvi.index_raster
+    destination:
+      - anomaly.baseline_rasters
+  - origin: comparison_ndvi.index_raster
+    destination:
+      - anomaly.comparison_rasters
+description:
+  short_description: >-
+    Detects NDVI anomalies by comparing vegetation indices between a baseline period
+    and a comparison period.
+  long_description: >-
+    This workflow compares vegetation health across two time periods to identify areas of
+    significant change. It downloads and preprocesses Sentinel-2 imagery for both a baseline
+    period (e.g., same season last year) and a comparison period (e.g., current season),
+    computes NDVI for each period, then calculates the per-pixel difference. Areas where
+    the NDVI decline exceeds the configurable threshold are flagged as anomalies.
+
+    Use cases include detecting drought stress, disease outbreaks, pest damage, or management
+    changes by comparing current vegetation health to historical baselines. The workflow
+    accounts for cloud cover using improved masks and aggregates multiple dates within
+    each period to reduce noise from individual observations.
+
+    The output includes a change map (GeoTIFF showing per-pixel NDVI difference), an anomaly
+    map (categorical raster flagging problem areas), and summary statistics quantifying
+    the extent and severity of detected anomalies.
+  sources:
+    baseline_input: >-
+      Time range and geometry for the baseline (reference) period. This should typically
+      be the same season from a previous year or a known healthy period.
+    comparison_input: >-
+      Time range and geometry for the comparison (current) period. Should cover the same
+      geometry as baseline_input but a different time range.
+  sinks:
+    change_raster: >-
+      Per-pixel NDVI change raster (GeoTIFF). Values are comparison - baseline, so negative
+      values indicate vegetation decline.
+    anomaly_raster: >-
+      Binary categorical raster flagging anomaly zones. Pixels with NDVI decline exceeding
+      the threshold are marked as anomalies.
+    summary: >-
+      Summary statistics including mean change, standard deviation, anomaly fraction,
+      and pixel counts.
+    baseline_ndvi: NDVI rasters computed for the baseline period.
+    comparison_ndvi: NDVI rasters computed for the comparison period.
+  parameters:
+    pc_key: Optional Planetary Computer API key.
+    threshold: >-
+      NDVI difference threshold for flagging anomalies. Default is -0.1 (flag pixels with
+      more than 0.1 NDVI decline). Use more negative values for stricter detection
+      (e.g., -0.2 for 20% decline).

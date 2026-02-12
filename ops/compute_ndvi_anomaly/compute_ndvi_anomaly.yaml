@@ -1,0 +1,39 @@
+name: compute_ndvi_anomaly
+inputs:
+  baseline_rasters: List[Raster]
+  comparison_rasters: List[Raster]
+  input_geometry: DataVibe
+output:
+  change_raster: List[Raster]
+  anomaly_raster: List[CategoricalRaster]
+  summary: List[DataVibe]
+parameters:
+  threshold: -0.1
+entrypoint:
+  file: compute_ndvi_anomaly.py
+  callback_builder: CallbackBuilder
+dependencies:
+  parameters:
+    - threshold
+description:
+  short_description: >-
+    Computes NDVI anomalies between a baseline period and a comparison period by comparing
+    temporal mean NDVI values at each pixel.
+  long_description: >-
+    This operator compares vegetation health between two time periods by computing the temporal
+    mean NDVI for each period and calculating the per-pixel difference. Pixels where the NDVI
+    decline exceeds the threshold are flagged as anomalies. The output includes a change raster
+    (comparison - baseline), an anomaly raster with binary flags, and summary statistics.
+    Negative threshold values (default -0.1) flag pixels with significant NDVI decline.
+  inputs:
+    baseline_rasters: NDVI rasters from the baseline (reference) period.
+    comparison_rasters: NDVI rasters from the comparison (current) period.
+    input_geometry: Geometry of interest for clipping and metadata.
+  output:
+    change_raster: Per-pixel NDVI change (comparison - baseline). Negative = decline.
+    anomaly_raster: Binary categorical raster flagging anomaly zones (1=anomaly, 0=normal).
+    summary: Summary statistics including mean change, anomaly fraction, etc.
+  parameters:
+    threshold: >-
+      NDVI difference threshold for flagging anomalies. Default is -0.1, meaning pixels with
+      more than 0.1 NDVI decline are flagged. More negative values = stricter threshold.
