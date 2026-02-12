@@ -29,6 +29,7 @@ setup(
         "uvicorn~=0.13.4",
         "urllib3~=1.26.8",
         "psutil~=5.9.0",
+        "prometheus_client~=0.20.0",
     ],
     entry_points={
         "console_scripts": [

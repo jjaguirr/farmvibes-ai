@@ -3,6 +3,7 @@
 
 """Utility functions for configuring logging."""
 
+import contextvars
 import json
 import logging
 import logging.handlers
@@ -18,9 +19,21 @@ LOG_FORMAT = "[%(asctime)s] [%(hostname)s] %(levelname)s [%(name)s:%(lineno)s] %
 JSON_FORMAT = (
     '{"app_id": "%(app)s", "instance": "%(hostname)s", "level": "%(levelname)s", '
     '"msg": %(json_message)s, "scope": "%(name)s", "time": "%(asctime)s", "type": "log", '
-    '"ver": "dev"}'
+    '"ver": "dev", "request_id": "%(request_id)s", "endpoint": "%(endpoint)s", '
+    '"duration_ms": "%(duration_ms)s"}'
 )
 """JSON log format."""
+
+# Context variables for per-request logging fields
+request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "request_id", default=""
+)
+request_endpoint_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "request_endpoint", default=""
+)
+request_duration_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "request_duration_ms", default=""
+)
 
 DEFAULT_LOGGER_LEVELS: Dict[str, str] = {
     "gdal": "INFO",
@@ -105,6 +118,20 @@ class JsonMessageFilter(Filter):
         return True
 
 
+class RequestContextFilter(Filter):
+    """Filter that injects per-request context (request_id, endpoint, duration_ms) into log records.
+
+    Values come from contextvars set by request middleware. Outside a request context,
+    fields default to empty strings.
+    """
+
+    def filter(self, record: LogRecord):
+        record.request_id = request_id_var.get()
+        record.endpoint = request_endpoint_var.get()
+        record.duration_ms = request_duration_var.get()
+        return True
+
+
 def change_logger_level(loggername: str, level: str):
     """Set the default log level for a logger.
 
@@ -162,6 +189,7 @@ def configure_logging(
     for handler in handlers:
         handler.addFilter(AppFilter(appname))
         handler.addFilter(HostnameFilter())
+        handler.addFilter(RequestContextFilter())
         handler.addFilter(JsonMessageFilter())
         handler.setFormatter(logging.Formatter(JSON_FORMAT if json else LOG_FORMAT))
         logger.addHandler(handler)

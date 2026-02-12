@@ -67,7 +67,15 @@ from vibe_core.datamodel import (
 )
 from vibe_core.logconfig import LOG_BACKUP_COUNT, MAX_LOG_FILE_BYTES, configure_logging
 
+from .health import get_detailed_health, get_readiness
 from .href_handler import BlobHrefHandler, HrefHandler, LocalHrefHandler
+from .logging_middleware import RequestContextMiddleware
+from .metrics import (
+    PrometheusMiddleware,
+    metrics_endpoint,
+    record_workflow_created,
+    update_active_runs_gauge,
+)
 from .workflow import get_workflow_path, workflow_from_input
 from .workflow import list_workflows as list_existing_workflows
 from .workflow.input_handler import (
@@ -397,6 +405,7 @@ class TerravibesProvider:
                     )
                 ),
             )
+            record_workflow_created()
         except (
             ValueError,
             pydantic.ValidationError,
@@ -744,6 +753,28 @@ class TerravibesAPI(FastAPI):
             """Submit a new workflow run."""
             return await self.terravibes.create_run(runConfig)
 
+        @self.get("/health", tags=["health"], response_model=None)
+        @version(0)
+        async def terravibes_health():
+            """Detailed health check with per-dependency status and latency."""
+            report = await get_detailed_health(self.terravibes.state_store)
+            status_code = 200 if report.status == "healthy" else 503
+            return JSONResponse(
+                status_code=status_code,
+                content={
+                    "status": report.status,
+                    "dependencies": [
+                        {
+                            "name": d.name,
+                            "status": d.status.value,
+                            "latency_ms": round(d.latency_ms, 2),
+                            "detail": d.detail,
+                        }
+                        for d in report.dependencies
+                    ],
+                },
+            )
+
         self.versioned_wrapper = VersionedFastAPI(
             self, version_format="{major}", prefix_format="/v{major}"
         )
@@ -754,6 +785,31 @@ class TerravibesAPI(FastAPI):
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+        # Root-level endpoints (outside /v0/ prefix) for K8s probes and Prometheus
+        self.versioned_wrapper.add_api_route(
+            "/healthz/live",
+            self._liveness,
+            methods=["GET"],
+            include_in_schema=False,
+        )
+        self.versioned_wrapper.add_api_route(
+            "/healthz/ready",
+            self._readiness,
+            methods=["GET"],
+            include_in_schema=False,
+        )
+        self.versioned_wrapper.add_api_route(
+            "/metrics",
+            self._metrics_endpoint,
+            methods=["GET"],
+            include_in_schema=False,
+        )
+
+        # Middleware (added in reverse execution order: last added runs first)
+        self.versioned_wrapper.add_middleware(PrometheusMiddleware)
+        self.versioned_wrapper.add_middleware(RequestContextMiddleware)
+
         self.uvicorn_config = uvicorn.Config(
             app=self.versioned_wrapper,
             host=host,
@@ -762,6 +818,23 @@ class TerravibesAPI(FastAPI):
             debug=debug,
             log_config=None,
         )
+
+    @staticmethod
+    async def _liveness():
+        """Liveness probe -- always returns 200 if the process can handle requests."""
+        return JSONResponse(status_code=200, content={"status": "alive"})
+
+    async def _readiness(self):
+        """Readiness probe -- checks Dapr sidecar and state store."""
+        ready = await get_readiness(self.terravibes.state_store)
+        if ready:
+            return JSONResponse(status_code=200, content={"status": "ready"})
+        return JSONResponse(status_code=503, content={"status": "not ready"})
+
+    async def _metrics_endpoint(self):
+        """Prometheus metrics endpoint."""
+        await update_active_runs_gauge(self.terravibes.state_store)
+        return await metrics_endpoint()
 
     async def run(self):
         server = uvicorn.Server(self.uvicorn_config)

@@ -61,8 +61,8 @@ resource "kubernetes_deployment" "restapi" {
           "dapr.io/metrics-port"   = "9090"
           "dapr.io/log-as-json"    = "true"
           "prometheus.io/scrape"   = "true"
-          "prometheus.io/port"     = "9090"
-          "prometheus.io/path"     = "/"
+          "prometheus.io/port"     = "3000"
+          "prometheus.io/path"     = "/metrics"
         }
       }
 
@@ -100,6 +100,26 @@ resource "kubernetes_deployment" "restapi" {
               mount_path = "/mnt/"
               name       = "host-mount"
             }
+          }
+          liveness_probe {
+            http_get {
+              path = "/healthz/live"
+              port = 3000
+            }
+            initial_delay_seconds = 10
+            period_seconds        = 15
+            timeout_seconds       = 2
+            failure_threshold     = 3
+          }
+          readiness_probe {
+            http_get {
+              path = "/healthz/ready"
+              port = 3000
+            }
+            initial_delay_seconds = 15
+            period_seconds        = 10
+            timeout_seconds       = 3
+            failure_threshold     = 3
           }
         }
         dynamic "volume" {
