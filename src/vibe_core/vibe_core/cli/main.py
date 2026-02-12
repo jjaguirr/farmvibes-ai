@@ -11,11 +11,20 @@ from .local import dispatch as dispatch_local
 from .logging import log
 from .parsers import LocalCliParser, RemoteCliParser
 from .remote import dispatch as dispatch_remote
+from .workflow import main as workflow_main
 
 
 def main():
+    # Handle 'workflow' command separately (doesn't need cluster type)
+    if len(sys.argv) > 1 and sys.argv[1] == "workflow":
+        sys.exit(workflow_main(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(description="FarmVibes.AI cluster deployment tool")
-    parser.add_argument("cluster_type", choices=["remote", "local"], help="Cluster type to manage")
+    parser.add_argument(
+        "cluster_type",
+        choices=["remote", "local", "workflow"],
+        help="Cluster type to manage, or 'workflow' for workflow tools",
+    )
     parser.add_argument("-v", "--verbose", help="Increase output verbosity", action="store_true")
     parser.add_argument(
         "--auto-confirm", required=False, help="Answer every question as yes", action="store_true"
