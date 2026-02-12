@@ -86,8 +86,6 @@ class TerraformWrapper:
         "cosmosdb",
         "storageaccount",
     ]
-    PLUGIN_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "farmvibes-ai", "terraform")
-
     def __init__(
         self,
         os_artifacts: OSArtifacts,
@@ -97,6 +95,9 @@ class TerraformWrapper:
         self.az = az
         self.os_artifacts = os_artifacts
         self.environment = environment
+        self.PLUGIN_CACHE_DIR = os.path.join(
+            str(os_artifacts.config_dir), "terraform-plugins"
+        )
         os.makedirs(self.PLUGIN_CACHE_DIR, exist_ok=True)
 
     def _get_replacements(self, plan: str) -> List[str]:
@@ -494,7 +495,7 @@ class TerraformWrapper:
         is_update: bool = False,
     ):
         if not is_update:
-            self.init(self.os_artifacts.local_directory, False, cleanup_state=True)
+            self.init(self.os_artifacts.local_directory, False, cleanup_state=False)
             # Remove stale state file so terraform starts fresh against the new cluster
             state_file_path = self.os_artifacts.get_terraform_file("local.tfstate", cluster_name)
             for stale in [state_file_path, f"{state_file_path}.backup"]:
@@ -1754,6 +1755,20 @@ class K3dWrapper:
                 env_vars={"K3D_FIX_DNS": "1"},
             )
             log("Cluster created successfully")
+
+        # Write kubeconfig to the config dir so Terraform can find it
+        kubeconfig_path = self.os_artifacts.config_file("kubeconfig")
+        cmd = [
+            self.os_artifacts.k3d, "kubeconfig", "write", cluster_name,
+            "--output", kubeconfig_path, "--overwrite",
+        ]
+        execute_cmd(
+            cmd,
+            check_empty_result=False,
+            error_string="Failed to write kubeconfig to config directory",
+            subprocess_log_level="debug",
+        )
+        log(f"Wrote kubeconfig to {kubeconfig_path}")
         return True
 
 

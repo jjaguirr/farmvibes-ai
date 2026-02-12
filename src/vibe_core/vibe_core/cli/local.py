@@ -9,9 +9,11 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
+from vibe_core.cli.config import load_config as _load_config
 from vibe_core.cli.constants import (
     AZURE_CR_DOMAIN,
     DEFAULT_IMAGE_PREFIX,
@@ -39,15 +41,17 @@ from vibe_core.cli.wrappers import (
     TerraformWrapper,
 )
 
+_cfg = _load_config()
+
 DEFAULT_STORAGE_PATH = os.environ.get(
     "FARMVIBES_AI_STORAGE_PATH",
     os.path.join(os.path.expanduser("~"), ".cache", "farmvibes-ai"),
 )
 DATA_SUFFIX = "data"
 REDIS_DUMP = "redis-dump.rdb"
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 31108
-REGISTRY_PORT = 5000
+DEFAULT_HOST = _cfg.host
+DEFAULT_PORT = _cfg.port
+REGISTRY_PORT = _cfg.registry_port
 OLD_DEFAULT_CLUSTER_NAME = "farmvibes-ai"
 
 
@@ -361,11 +365,6 @@ def setup(
                 log("Unable to upgrade Dapr CRDs", level="error")
                 return False
             dapr_updated = True
-
-    # Pre-flight: verify required base images are accessible before running Terraform
-    _docker = DockerWrapper(k3d.os_artifacts)
-    if not check_images_accessible(_docker):
-        return False
 
     # Pre-flight: verify required base images are accessible before running Terraform
     _docker = DockerWrapper(k3d.os_artifacts)
@@ -737,6 +736,14 @@ def add_onnx(cluster_name: str, storage_path: str, onnx: str):
 
 
 def dispatch(args: argparse.Namespace):
+    # Validate configuration before doing anything.
+    # If env vars contain bad values, fail early with a clear message.
+    try:
+        _load_config()
+    except ValidationError as e:
+        show_error("Invalid configuration", str(e))
+        return False
+
     os_artifacts = OSArtifacts()
     os_artifacts.check_dependencies(InstallType.LOCAL)
 
