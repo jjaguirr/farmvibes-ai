@@ -84,3 +84,27 @@ def non_existing_file(request: pytest.FixtureRequest):
     if location == "local":
         return "/nodir/nodir2/does_not_exist.txt"
     raise ValueError(f"Expected 'local' or 'remote' request, got {location}")
+
+
+# --- Worker hardening (Task 11) ---
+
+from unittest.mock import MagicMock, patch
+
+
+@pytest.fixture
+def worker(tmp_path):
+    """Worker instance with Dapr App and StateStore patched out.
+
+    Worker.__init__ creates App() (Dapr gRPC) and StateStore(), both of which
+    require a live Dapr sidecar. Patch them so tests can instantiate Worker.
+    """
+    with patch("vibe_agent.worker.App"), \
+         patch("vibe_agent.worker.StateStore"):
+        w = Worker(
+            termination_grace_period_s=90,
+            control_topic="commands",
+            max_tries=3,
+            factory_spec=MagicMock(),
+            port=3000,
+        )
+        yield w

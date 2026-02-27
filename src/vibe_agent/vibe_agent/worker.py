@@ -52,6 +52,7 @@ from vibe_core.utils import get_input_ids
 from .ops import OperationFactoryConfig, OperationSpec
 
 MESSAGING_RETRY_INTERVAL_S = 1
+MESSAGING_MAX_SEND_ATTEMPTS = 60  # ~1 minute cap; worker doesn't hang forever
 TERMINATION_GRACE_PERIOD_S = 5
 MAX_OP_EXECUTION_TIME_S = 60 * 60 * 3
 
@@ -148,36 +149,52 @@ def run_op(
 
 
 class WorkerMessenger:
-    pubsubname: str
-    status_topic: str
-    logger: logging.Logger
-
     def __init__(
-        self, pubsubname: str = CONTROL_STATUS_PUBSUB, status_topic: str = STATUS_PUBSUB_TOPIC
+        self,
+        pubsubname: str = CONTROL_STATUS_PUBSUB,
+        status_topic: str = STATUS_PUBSUB_TOPIC,
+        max_send_attempts: int = MESSAGING_MAX_SEND_ATTEMPTS,
+        retry_interval_s: float = MESSAGING_RETRY_INTERVAL_S,
     ):
         self.pubsubname = pubsubname
         self.status_topic = status_topic
+        self.max_send_attempts = max_send_attempts
+        self.retry_interval_s = retry_interval_s
+        # Deadline is set by the Worker during shutdown so send() doesn't
+        # overrun the termination grace period. None = no deadline.
+        self.deadline: Optional[float] = None
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+
+    def _attempts_remaining(self, tries_so_far: int) -> bool:
+        if tries_so_far >= self.max_send_attempts:
+            return False
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            return False
+        return True
 
     async def send(self, message: WorkMessage) -> None:
         tries: int = 0
         sent = False
-        while True:
+        while not sent:
+            if not self._attempts_remaining(tries):
+                msg = (
+                    f"Giving up sending {message.header.type} after {tries} attempts"
+                    f"{' (shutdown deadline reached)' if self.deadline else ''}."
+                )
+                self.logger.error(msg)
+                raise RuntimeError(msg)
             try:
                 sent = await send_async(message, "worker", self.pubsubname, self.status_topic)
             except Exception:
-                pass
+                sent = False
             if sent:
                 break
             tries += 1
-            # We did some work, now we have to report what happened to the op
-            # If we are shutting down, we have TERMINATION_GRACE_PERIOD_S to try before exiting.
-            # Otherwise, it seems to make sense to keep retrying until we succeed.
-            self.logger.warn(
-                f"Failed to send {message} after {tries} attempts. "
-                f"Sleeping for {MESSAGING_RETRY_INTERVAL_S}s before retrying."
+            self.logger.warning(
+                f"Failed to send {message.header.type} (attempt {tries}/"
+                f"{self.max_send_attempts}). Retrying in {self.retry_interval_s}s."
             )
-            await asyncio.sleep(MESSAGING_RETRY_INTERVAL_S)
+            await asyncio.sleep(self.retry_interval_s)
 
     async def send_ack_reply(self, origin: WorkMessage) -> None:
         await self.send(WorkMessageBuilder.build_ack_reply(origin.id))
