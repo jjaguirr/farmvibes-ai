@@ -15,11 +15,12 @@ Design notes:
 
 import asyncio
 import functools
+import inspect
 import logging
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional, TypeVar, Union, cast
+from typing import Any, Awaitable, Callable, Optional, TypeVar, cast
 
 T = TypeVar("T")
 
@@ -60,3 +61,67 @@ def compute_backoff(attempt: int, policy: RetryPolicy) -> float:
     if policy.jitter:
         return random.uniform(0, capped)
     return capped
+
+
+def with_retry(
+    policy: RetryPolicy,
+    logger: Optional[logging.Logger] = None,
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
+    """Decorator that retries the wrapped callable per `policy`.
+
+    Works on sync and async callables. Logs WARNING on each failed attempt
+    with the exception class and next delay. Re-raises the last exception
+    when attempts are exhausted or the exception is not retryable.
+    """
+    log = logger or logging.getLogger(__name__)
+
+    def decorator(fn: Callable[..., T]) -> Callable[..., T]:
+        fn_name = getattr(fn, "__name__", repr(fn))
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> T:
+                last_exc: Optional[BaseException] = None
+                for attempt in range(policy.max_attempts):
+                    try:
+                        return await cast(Callable[..., Awaitable[T]], fn)(*args, **kwargs)
+                    except Exception as e:
+                        last_exc = e
+                        if not policy.retryable(e):
+                            raise
+                        if attempt + 1 >= policy.max_attempts:
+                            raise
+                        delay = compute_backoff(attempt, policy)
+                        log.warning(
+                            f"{fn_name}: attempt {attempt + 1}/{policy.max_attempts} "
+                            f"failed with {type(e).__name__}: {e}. "
+                            f"Retrying in {delay:.2f}s."
+                        )
+                        await asyncio.sleep(delay)
+                assert last_exc is not None
+                raise last_exc
+            return cast(Callable[..., T], async_wrapper)
+
+        @functools.wraps(fn)
+        def sync_wrapper(*args: Any, **kwargs: Any) -> T:
+            last_exc: Optional[BaseException] = None
+            for attempt in range(policy.max_attempts):
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as e:
+                    last_exc = e
+                    if not policy.retryable(e):
+                        raise
+                    if attempt + 1 >= policy.max_attempts:
+                        raise
+                    delay = compute_backoff(attempt, policy)
+                    log.warning(
+                        f"{fn_name}: attempt {attempt + 1}/{policy.max_attempts} "
+                        f"failed with {type(e).__name__}: {e}. "
+                        f"Retrying in {delay:.2f}s."
+                    )
+                    time.sleep(delay)
+            assert last_exc is not None
+            raise last_exc
+        return sync_wrapper
+
+    return decorator
