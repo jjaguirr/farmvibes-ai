@@ -88,3 +88,20 @@ def test_with_retry_logs_each_attempt(caplog):
         wrapped()
     assert any("attempt 1/3" in r.message and "ConnectionError" in r.message
                for r in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_with_retry_async_path():
+    calls = []
+
+    async def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise ConnectionError("transient")
+        return "ok"
+
+    p = RetryPolicy(max_attempts=5, base_delay_s=0.001, jitter=False)
+    wrapped = with_retry(p)(flaky)
+    result = await wrapped()
+    assert result == "ok"
+    assert len(calls) == 3
