@@ -11,21 +11,25 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from vibe_agent.worker import WorkerMessenger
+from vibe_agent.worker import WorkerMessenger, ShuttingDownException
 
 
 # --- WorkerMessenger send cap (Task 6) ---
 
 @pytest.mark.anyio
 async def test_messenger_send_caps_retries():
-    """send() must not loop forever when pubsub is down."""
+    """send() must not loop forever when pubsub is down (no shutdown in progress)."""
     messenger = WorkerMessenger()
     messenger.max_send_attempts = 3
     messenger.retry_interval_s = 0.01
 
     with patch("vibe_agent.worker.send_async", new=AsyncMock(return_value=False)):
-        with pytest.raises(RuntimeError, match="3 attempts"):
+        with pytest.raises(RuntimeError, match="3 attempts") as exc_info:
             await messenger.send(MagicMock())
+    # Cap-triggered give-up is NOT a shutdown condition — a plain RuntimeError
+    # is the right type so fetch_work sends a failure reply instead of
+    # silently retrying forever.
+    assert not isinstance(exc_info.value, ShuttingDownException)
 
 
 @pytest.mark.anyio
@@ -47,8 +51,14 @@ async def test_messenger_send_succeeds_after_transient_failure():
 
 
 @pytest.mark.anyio
-async def test_messenger_send_respects_deadline():
-    """Deadline already past → give up before ever calling send_async."""
+async def test_messenger_send_raises_shutdown_on_expired_deadline():
+    """Deadline already past → raise ShuttingDownException (→ retry, not drop).
+
+    If we raised RuntimeError here, a success reply that couldn't be sent
+    during drain would cascade through run_op_from_message → fetch_work →
+    accept_or_fail_event and end up as TopicEventResponse("drop"). The op's
+    result would be lost. ShuttingDownException routes to retry instead.
+    """
     import time
 
     messenger = WorkerMessenger()
@@ -58,9 +68,36 @@ async def test_messenger_send_respects_deadline():
 
     mock_send = AsyncMock(return_value=False)
     with patch("vibe_agent.worker.send_async", new=mock_send):
-        with pytest.raises(RuntimeError, match="deadline"):
+        with pytest.raises(ShuttingDownException):
             await messenger.send(MagicMock())
     mock_send.assert_not_called()  # bailed at the gate, no wasted attempt
+
+
+@pytest.mark.anyio
+async def test_messenger_send_checks_deadline_between_attempts():
+    """Deadline crossed mid-retry → ShuttingDownException on next loop."""
+    import time
+
+    messenger = WorkerMessenger()
+    messenger.max_send_attempts = 100
+    messenger.retry_interval_s = 0.0
+    messenger.deadline = time.monotonic() + 3600  # far future at first
+
+    call_count = 0
+    async def failing_send(*a, **kw):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            # Simulate deadline crossing while we were retrying.
+            messenger.deadline = time.monotonic() - 1.0
+        return False
+
+    with patch("vibe_agent.worker.send_async", new=failing_send):
+        with pytest.raises(ShuttingDownException):
+            await messenger.send(MagicMock())
+    # Exactly 2 attempts: deadline flipped during attempt 2, loop checks
+    # deadline at top of iteration 3 and bails before a 3rd call.
+    assert call_count == 2
 
 
 # --- Drain-and-requeue shutdown (Task 7) ---
@@ -68,7 +105,7 @@ async def test_messenger_send_respects_deadline():
 import signal
 import time
 
-from vibe_agent.worker import Worker, ShuttingDownException
+from vibe_agent.worker import Worker
 
 
 def test_sigterm_sets_deadline_without_cancelling_child(worker: Worker):

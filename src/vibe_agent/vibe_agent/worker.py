@@ -174,22 +174,27 @@ class WorkerMessenger:
         self.deadline: Optional[float] = None
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-    def _attempts_remaining(self, tries_so_far: int) -> bool:
-        if tries_so_far >= self.max_send_attempts:
-            return False
-        if self.deadline is not None and time.monotonic() >= self.deadline:
-            return False
-        return True
+    def _deadline_expired(self) -> bool:
+        return self.deadline is not None and time.monotonic() >= self.deadline
 
     async def send(self, message: WorkMessage) -> None:
         tries: int = 0
         sent = False
         while not sent:
-            if not self._attempts_remaining(tries):
-                msg = (
-                    f"Giving up sending {message.header.type} after {tries} attempts"
-                    f"{' (shutdown deadline reached)' if self.deadline else ''}."
+            if self._deadline_expired():
+                # Deadline is only ever set by Worker.pre_stop_hook, so this is
+                # definitionally a shutdown-triggered give-up. Raise
+                # ShuttingDownException (not RuntimeError) so fetch_work returns
+                # TopicEventResponse("retry") and the message is redelivered to
+                # another worker — otherwise a success reply we couldn't publish
+                # would fall through to "drop" and the result would be lost.
+                self.logger.warning(
+                    f"Shutdown deadline reached with {message.header.type} unsent "
+                    f"after {tries} attempts. Message will be redelivered."
                 )
+                raise ShuttingDownException()
+            if tries >= self.max_send_attempts:
+                msg = f"Giving up sending {message.header.type} after {tries} attempts."
                 self.logger.error(msg)
                 raise RuntimeError(msg)
             try:
