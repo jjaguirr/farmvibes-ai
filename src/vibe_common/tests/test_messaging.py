@@ -154,3 +154,69 @@ def test_refuse_to_encode_message_with_invalid_values(workflow_execution_message
         content.input["plain_input"]["data"] = [{"a": value}]  # type: ignore
         with pytest.raises(ValueError):
             workflow_execution_message.to_cloud_event("test")
+
+
+def test_heartbeat_message_type_exists():
+    from vibe_common.messaging import MessageType
+    assert hasattr(MessageType, "heartbeat")
+
+
+def test_heartbeat_content_fields():
+    from vibe_common.messaging import HeartbeatContent
+    content = HeartbeatContent(
+        op_name="compute_ndvi",
+        worker_id="worker-pod-abc123",
+        memory_usage_bytes=2147483648,
+    )
+    assert content.op_name == "compute_ndvi"
+    assert content.worker_id == "worker-pod-abc123"
+    assert content.memory_usage_bytes == 2147483648
+
+
+def test_heartbeat_message_valid_for_status_channel():
+    from uuid import uuid4
+    from vibe_common.messaging import (
+        HeartbeatContent,
+        HeartbeatMessage,
+        MessageHeader,
+        MessageType,
+    )
+    header = MessageHeader(
+        type=MessageType.heartbeat,
+        run_id=uuid4(),
+    )
+    content = HeartbeatContent(
+        op_name="compute_ndvi",
+        worker_id="worker-1",
+        memory_usage_bytes=0,
+    )
+    msg = HeartbeatMessage(header=header, content=content)
+    assert msg.is_valid_for_channel("updates")
+    assert not msg.is_valid_for_channel("commands")
+
+
+def test_build_heartbeat_message():
+    from vibe_common.messaging import (
+        HeartbeatContent,
+        HeartbeatMessage,
+        MessageType,
+        WorkMessageBuilder,
+        gen_traceparent,
+    )
+    from uuid import uuid4
+    run_id = uuid4()
+    traceparent = gen_traceparent(run_id)
+    msg = WorkMessageBuilder.build_heartbeat(
+        traceparent=traceparent,
+        op_name="download_sentinel",
+        worker_id="worker-pod-xyz",
+        memory_usage_bytes=1073741824,
+    )
+    assert isinstance(msg, HeartbeatMessage)
+    assert msg.header.type == MessageType.heartbeat
+    assert msg.run_id == run_id
+    content = msg.content
+    assert isinstance(content, HeartbeatContent)
+    assert content.op_name == "download_sentinel"
+    assert content.worker_id == "worker-pod-xyz"
+    assert content.memory_usage_bytes == 1073741824

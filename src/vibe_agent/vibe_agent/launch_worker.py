@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-import asyncio
 import signal
 from multiprocessing import set_start_method
 from typing import Any
@@ -42,5 +41,6 @@ cs.store(name="vibe_worker", node=WorkerLaunchConfig)
 def main(cfg: Any):
     set_start_method("forkserver")
     worker_obj = instantiate(cfg)
-    signal.signal(signal.SIGTERM, worker_obj.worker.impl.pre_stop_hook)
-    asyncio.run(worker_obj.worker.impl.run())
+    worker = worker_obj.worker.impl
+    worker.shutdown_manager.register_signals([signal.SIGTERM, signal.SIGINT])
+    worker.run()

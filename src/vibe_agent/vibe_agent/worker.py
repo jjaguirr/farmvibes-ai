@@ -27,6 +27,7 @@ from pebble.common import ProcessExpired
 
 from vibe_common.constants import CONTROL_STATUS_PUBSUB, STATUS_PUBSUB_TOPIC
 from vibe_common.dapr import dapr_ready
+from vibe_common.graceful_shutdown import ShutdownManager
 from vibe_common.messaging import (
     CacheInfoExecuteRequestContent,
     CacheInfoExecuteRequestMessage,
@@ -36,6 +37,8 @@ from vibe_common.messaging import (
     extract_message_header_from_event,
     send_async,
 )
+from vibe_common.resource_monitor import ResourceMonitor
+from vibe_common.retry import retry_with_backoff
 from vibe_common.schemas import CacheInfo
 from vibe_common.statestore import StateStore
 from vibe_common.telemetry import (
@@ -54,6 +57,7 @@ from .ops import OperationFactoryConfig, OperationSpec
 MESSAGING_RETRY_INTERVAL_S = 1
 TERMINATION_GRACE_PERIOD_S = 5
 MAX_OP_EXECUTION_TIME_S = 60 * 60 * 3
+SHUTDOWN_SEND_TIMEOUT_S = 10
 
 
 class ShuttingDownException(Exception):
@@ -153,15 +157,29 @@ class WorkerMessenger:
     logger: logging.Logger
 
     def __init__(
-        self, pubsubname: str = CONTROL_STATUS_PUBSUB, status_topic: str = STATUS_PUBSUB_TOPIC
+        self,
+        pubsubname: str = CONTROL_STATUS_PUBSUB,
+        status_topic: str = STATUS_PUBSUB_TOPIC,
+        shutdown_manager: Optional[ShutdownManager] = None,
     ):
         self.pubsubname = pubsubname
         self.status_topic = status_topic
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self._shutdown_manager = shutdown_manager
 
-    async def send(self, message: WorkMessage) -> None:
+    async def send(self, message: WorkMessage, timeout_s: float = 0) -> None:
         tries: int = 0
         sent = False
+        start = time.time()
+        # During shutdown, apply a bounded timeout so we don't block the drain
+        # sequence waiting for a sidecar that may already be gone.
+        effective_timeout = timeout_s
+        if effective_timeout <= 0 and self._shutdown_manager is not None:
+            if self._shutdown_manager.is_draining:
+                effective_timeout = SHUTDOWN_SEND_TIMEOUT_S
+                self.logger.info(
+                    f"Shutdown in progress, applying {effective_timeout}s send deadline"
+                )
         while True:
             try:
                 sent = await send_async(message, "worker", self.pubsubname, self.status_topic)
@@ -170,9 +188,12 @@ class WorkerMessenger:
             if sent:
                 break
             tries += 1
-            # We did some work, now we have to report what happened to the op
-            # If we are shutting down, we have TERMINATION_GRACE_PERIOD_S to try before exiting.
-            # Otherwise, it seems to make sense to keep retrying until we succeed.
+            if effective_timeout > 0 and (time.time() - start) >= effective_timeout:
+                self.logger.error(
+                    f"Failed to send {message} after {tries} attempts "
+                    f"and {effective_timeout}s timeout. Giving up."
+                )
+                return
             self.logger.warn(
                 f"Failed to send {message} after {tries} attempts. "
                 f"Sleeping for {MESSAGING_RETRY_INTERVAL_S}s before retrying."
@@ -224,7 +245,6 @@ class Worker:
     status_topic: str
     control_topic: str
     current_message: Optional[WorkMessage] = None
-    shutting_down: bool = False
     child_monitoring_period_s: int = 10
     termination_grace_period_s: int = 2
     state_store: StateStore
@@ -261,13 +281,18 @@ class Worker:
         self.otel_service_name = otel_service_name
 
         self.app = App()
-        self.messenger = WorkerMessenger(pubsubname, status_topic)
+        self.shutdown_manager = ShutdownManager()
+        self.messenger = WorkerMessenger(pubsubname, status_topic, self.shutdown_manager)
         self.current_message = None
-        self.shutdown_lock = threading.Lock()
         self.work_lock = threading.Lock()
         self.max_tries = max_tries
         self.factory_spec = factory_spec
         self.statestore = StateStore()
+        self.resource_monitor = ResourceMonitor()
+        self.shutdown_manager.on_shutdown(lambda: self.resource_monitor.stop())
+        self.heartbeat_interval_s = 30
+        self._last_heartbeat_time = 0.0
+        self.worker_id = os.environ.get("HOSTNAME", f"worker-{os.getpid()}")
         self.name = self.__class__.__name__
         self._setup_routes_and_events()
 
@@ -281,6 +306,29 @@ class Worker:
                     "probably because it terminated already"
                 )
 
+    def _publish_heartbeat(self):
+        if self.current_message is None:
+            return
+        mem = self.resource_monitor.get_memory_usage()
+        memory_bytes = mem.current_bytes if mem else 0
+        content = cast(CacheInfoExecuteRequestContent, self.current_message.content)
+        op_name = str(content.operation_spec.name) if content.operation_spec else "unknown"
+        heartbeat = WorkMessageBuilder.build_heartbeat(
+            traceparent=self.current_message.id,
+            op_name=op_name,
+            worker_id=self.worker_id,
+            memory_usage_bytes=memory_bytes,
+        )
+        logger = self.logger
+
+        def _send():
+            try:
+                asyncio.run(self.messenger.send(heartbeat, timeout_s=5))
+            except Exception:
+                logger.debug("Failed to send heartbeat, will retry next interval")
+
+        threading.Thread(target=_send, name="heartbeat-send", daemon=True).start()
+
     def _setup_routes_and_events(self):
         @self.app.subscribe(self.pubsubname, self.control_topic)
         def fetch_work(event: v1.Event) -> TopicEventResponse:
@@ -293,21 +341,19 @@ class Worker:
             return TopicEventResponse("retry")
 
     def pre_stop_hook(self, signum: int, _: Any):
-        self.shutdown_lock.acquire()
-        if self.shutting_down:
-            self.logger.warning(
-                f"Shutdown requested while already shutting down. Ignoring. (signal: {signum})"
-            )
-            self.shutdown_lock.release()
-            return
-        self.shutting_down = True
-        try:
-            if self.current_message is not None:
+        self.shutdown_manager.shutdown()
+        # Stop the gRPC server to reject new message deliveries
+        if self.app._server is not None:
+            self.app._server.stop(None)
+        # Wait for current work to finish within grace period
+        if self.current_message is not None:
+            if not self.shutdown_manager.wait_for_completion(self.termination_grace_period_s):
+                self.logger.warning(
+                    f"Grace period ({self.termination_grace_period_s}s) expired, "
+                    "cancelling current work"
+                )
                 self._terminate_child()
-        finally:
-            if self.app._server is not None:
-                self.app._server.stop(None)
-            self.shutdown_lock.release()
+        self.shutdown_manager.finalize()
 
     def run(self):
         appname = "terravibes-worker"
@@ -320,12 +366,13 @@ class Worker:
         )
         if self.otel_service_name:
             setup_telemetry(appname, self.otel_service_name)
+        self.resource_monitor.start_periodic_logging(interval_s=30, logger=self.logger)
         self.start_service()
 
     @dapr_ready
     def start_service(self):
         self.logger.info(f"Starting worker listening on port {self.port}")
-        while not self.shutting_down:
+        while not self.shutdown_manager.is_draining:
             # For some reason, the FastAPI lifecycle shutdown action is
             # executing without us intending for it to run. We add this loop
             # here to bring the server up if we haven't explicitly initiated the
@@ -350,6 +397,7 @@ class Worker:
             raise
         finally:
             self.current_message = None
+            self.shutdown_manager.mark_work_complete()
 
     def is_workflow_complete(self, message: WorkMessage) -> bool:
         try:
@@ -380,7 +428,7 @@ class Worker:
                 )
                 return TopicEventResponse("drop")
 
-            if self.shutting_down:
+            if self.shutdown_manager.is_draining:
                 self.logger.info(f"Shutdown in progress. Rejecting event {event.id}")
                 return TopicEventResponse("retry")
 
@@ -392,8 +440,10 @@ class Worker:
                 self.run_op_from_message(message, MAX_OP_EXECUTION_TIME_S)
                 return TopicEventResponse("success")
             except ShuttingDownException:
+                self.shutdown_manager.mark_work_complete()
                 return TopicEventResponse("retry")
             except Exception:
+                self.shutdown_manager.mark_work_complete()
                 self.logger.exception(f"Failed to run op for event {event.id}")
                 raise
             finally:
@@ -416,6 +466,11 @@ class Worker:
                 ret = child.result(monitoring_period_s)
                 return ret
             except concurrent.futures.TimeoutError:
+                # Publish heartbeat if interval has elapsed
+                now = time.time()
+                if now - self._last_heartbeat_time >= self.heartbeat_interval_s:
+                    self._publish_heartbeat()
+                    self._last_heartbeat_time = now
                 assert self.current_message is not None, (
                     "There's a correctness issue in the worker code. "
                     "`current_message` should not be `None`."
@@ -430,13 +485,13 @@ class Worker:
                         "Workflow was completed/failed/cancelled while running op. "
                         "Terminating child process."
                     )
-                if self.shutting_down:
+                if self.shutdown_manager.is_draining:
                     self.logger.info("Shutdown process initiated. Terminating child process.")
                     child.cancel()
                     raise ShuttingDownException()
                 continue
             except concurrent.futures.CancelledError:
-                if self.shutting_down:
+                if self.shutdown_manager.is_draining:
                     raise ShuttingDownException()
                 self.logger.warn(
                     f"Child process was cancelled while running op {self.current_message}. "
@@ -468,44 +523,52 @@ class Worker:
         self, content: CacheInfoExecuteRequestContent, run_id: UUID, timeout_s: float
     ) -> OpIOType:
         spec = cast(OperationSpec, content.operation_spec)
-        ret: Union[traceback.TracebackException, OpIOType] = traceback.TracebackException(
-            RuntimeError, RuntimeError(f"Couldn't run op {spec} at all (run id: {run_id})"), None
-        )
         self.logger.info(
             f"Will try to execute op {spec} with input {get_input_ids(content.input)} "
             f"for at most {self.max_tries} tries in child process."
         )
         final_time = time.time() + timeout_s
-        for i in range(self.max_tries):
+
+        @retry_with_backoff(
+            max_retries=self.max_tries,
+            base_delay=1.0,
+            max_delay=60.0,
+            backoff_factor=2.0,
+            retryable_exceptions=(ProcessExpired, RuntimeError),
+            abort=lambda: self.shutdown_manager.is_draining,
+        )
+        def _attempt():
             inner_timeout = final_time - time.time()
-            if self.shutting_down:
-                self.logger.info(
-                    "Stopping execution of op because the shutdown process has been initiated."
+            if inner_timeout <= 0:
+                raise TimeoutError(
+                    f"Op execution budget exhausted ({timeout_s}s total)."
                 )
+            if self.shutdown_manager.is_draining:
                 raise ShuttingDownException()
             try:
                 ret = self.try_run_op(spec, content, inner_timeout)
-                if not isinstance(ret, traceback.TracebackException):
-                    self.logger.debug(f"Op {spec} ran successfully on try {i+1} (run id: {run_id})")
-                    break
-                self.logger.error(
-                    f"Failed to run op {spec} with input {get_input_ids(content.input)} "
-                    f"in subprocess. (try {i+1}/{self.max_tries}) {''.join(ret.format())}"
-                )
-            except ProcessExpired:
-                self.logger.exception(f"pebble child process failed on try {i+1}/{self.max_tries}")
-            except TimeoutError as e:
-                msg = (
-                    f"Op execution timed out on try {i+1}/{self.max_tries}. "
-                    f"Total time allowed: {timeout_s} seconds. "
-                    f"Last try was allowed to run for {inner_timeout} seconds."
-                )
-                self.logger.exception(msg)
-                raise RuntimeError(msg) from e
-        self.current_child = None
-        if isinstance(ret, traceback.TracebackException):
-            raise RuntimeError("".join(ret.format()))
-        return ret
+            except ProcessExpired as e:
+                self.resource_monitor.get_memory_usage()  # refresh last sample
+                exit_signal = abs(e.exitcode) if hasattr(e, 'exitcode') and e.exitcode else 0
+                if self.resource_monitor.detect_oom(exit_signal=exit_signal):
+                    msg = self.resource_monitor.format_oom_message(
+                        str(spec.name), exit_signal=exit_signal
+                    )
+                    self.logger.error(msg)
+                raise
+            if isinstance(ret, traceback.TracebackException):
+                raise RuntimeError("".join(ret.format()))
+            return ret
+
+        try:
+            result = _attempt()
+        except TimeoutError as e:
+            raise RuntimeError(
+                f"Op {spec} timed out. Total time allowed: {timeout_s}s."
+            ) from e
+        finally:
+            self.current_child = None
+        return result
 
 
 WorkerConfig = builds(

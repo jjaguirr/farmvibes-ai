@@ -70,6 +70,7 @@ MessageContent = Union[
     "EvictedReplyContent",
     "WorkflowCancellationContent",
     "WorkflowDeletionContent",
+    "HeartbeatContent",
 ]
 ValidVersion = Literal["1.0"]
 
@@ -89,6 +90,7 @@ class MessageType(StrEnum):
     workflow_execution_request = auto()
     workflow_cancellation_request = auto()
     workflow_deletion_request = auto()
+    heartbeat = auto()
 
 
 class BaseModel(PyBaseModel):
@@ -173,6 +175,12 @@ class WorkflowCancellationContent(BaseModel):
 
 class WorkflowDeletionContent(BaseModel):
     pass
+
+
+class HeartbeatContent(BaseModel):
+    op_name: str
+    worker_id: str
+    memory_usage_bytes: int
 
 
 class BaseMessage(BaseModel):
@@ -293,6 +301,11 @@ class AckMessage(BaseMessage):
     content: AckContent
 
 
+class HeartbeatMessage(BaseMessage):
+    _supported_channels: Set[str] = {STATUS_PUBSUB_TOPIC}
+    content: HeartbeatContent
+
+
 WorkMessage = Union[
     AckMessage,
     CacheInfoExecuteRequestMessage,
@@ -303,6 +316,7 @@ WorkMessage = Union[
     WorkflowExecutionMessage,
     WorkflowCancellationMessage,
     WorkflowDeletionMessage,
+    HeartbeatMessage,
 ]
 
 
@@ -392,6 +406,19 @@ class WorkMessageBuilder:
         content = AckContent()
         return AckMessage(header=header, content=content)
 
+    @staticmethod
+    def build_heartbeat(
+        traceparent: str, op_name: str, worker_id: str, memory_usage_bytes: int
+    ) -> WorkMessage:
+        run_id = run_id_from_traceparent(traceparent)
+        header = MessageHeader(
+            type=MessageType.heartbeat, run_id=run_id, parent_id=traceparent
+        )
+        content = HeartbeatContent(
+            op_name=op_name, worker_id=worker_id, memory_usage_bytes=memory_usage_bytes
+        )
+        return HeartbeatMessage(header=header, content=content)
+
 
 MESSAGE_TYPE_TO_CONTENT_TYPE: Dict[MessageType, Type[MessageContent]] = {
     MessageType.ack: AckContent,
@@ -403,6 +430,7 @@ MESSAGE_TYPE_TO_CONTENT_TYPE: Dict[MessageType, Type[MessageContent]] = {
     MessageType.workflow_execution_request: WorkflowExecutionContent,
     MessageType.workflow_cancellation_request: WorkflowCancellationContent,
     MessageType.workflow_deletion_request: WorkflowDeletionContent,
+    MessageType.heartbeat: HeartbeatContent,
 }
 
 

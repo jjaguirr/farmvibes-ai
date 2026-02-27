@@ -4,6 +4,7 @@
 import asyncio
 import asyncio.queues
 import logging
+import time
 from argparse import ArgumentParser
 from copy import copy
 from dataclasses import asdict
@@ -28,6 +29,8 @@ from vibe_common.constants import (
 from vibe_common.dapr import dapr_ready
 from vibe_common.dropdapr import App, TopicEventResponse
 from vibe_common.messaging import (
+    HeartbeatContent,
+    HeartbeatMessage,
     OpIOType,
     WorkflowCancellationMessage,
     WorkflowDeletionMessage,
@@ -389,6 +392,7 @@ class WorkflowRunManager:
         topic: str,
         ops_dir: str = DEFAULT_OPS_DIR,
         workflows_dir: str = get_workflow_dir(),
+        heartbeat_tracker: Optional[Dict[str, float]] = None,
         *args: Any,
         **kwargs: Dict[str, Any],
     ):
@@ -400,6 +404,7 @@ class WorkflowRunManager:
         self.is_cancelled = False
         self.ops_dir = ops_dir
         self.workflows_dir = workflows_dir
+        self._heartbeat_tracker = heartbeat_tracker or {}
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self.task = asyncio.create_task(self.start_managing())
         self.pubsubname = pubsubname
@@ -458,6 +463,8 @@ class WorkflowRunManager:
             pubsubname=self.pubsubname,
             source=self.source,
             topic=self.topic,
+            heartbeat_tracker=self._heartbeat_tracker,
+            heartbeat_timeout_s=60.0,
         )
         self.runner.is_cancelled = self.is_cancelled
         output = await self.runner.run(input_items, run_id)
@@ -541,6 +548,7 @@ class Orchestrator:
         self._workflow_management_tasks: Dict[UUID, WorkflowRunManager] = {}
         self.ops_dir = ops_dir
         self.workflows_dir = workflows_dir
+        self._last_heartbeats: Dict[str, float] = {}
 
         @self.app.subscribe_async(self.pubsubname, self.status_topic)
         async def update(event: v1.Event):
@@ -557,6 +565,12 @@ class Orchestrator:
                     f"Received unsupported message {message} for channel {channel}. Dropping it."
                 )
                 return TopicEventResponse("drop")
+            # Handle heartbeats separately - update tracking, don't route to runner
+            if isinstance(message, HeartbeatMessage):
+                content = cast(HeartbeatContent, message.content)
+                key = f"{message.run_id}:{content.op_name}"
+                self._last_heartbeats[key] = time.time()
+                return TopicEventResponse("success")
             if str(message.run_id) not in self.inqueues:
                 self.logger.info(
                     f"Received message {message}, but the run it references"
@@ -600,6 +614,7 @@ class Orchestrator:
             topic=self.cache_topic,
             ops_dir=self.ops_dir,
             workflows_dir=self.workflows_dir,
+            heartbeat_tracker=self._last_heartbeats,
         )
         self._workflow_management_tasks[message.run_id] = wf
 
@@ -607,6 +622,11 @@ class Orchestrator:
             self.logger.info(f"Workflow run {message.run_id} finished. Freeing up space.")
             self.inqueues.pop(str(message.run_id))
             self._workflow_management_tasks.pop(message.run_id)
+            # Purge heartbeat entries for this run to prevent unbounded growth
+            run_prefix = f"{message.run_id}:"
+            stale_keys = [k for k in self._last_heartbeats if k.startswith(run_prefix)]
+            for k in stale_keys:
+                self._last_heartbeats.pop(k, None)
             try:
                 maybe_exception = task.exception()
                 if maybe_exception is not None:
