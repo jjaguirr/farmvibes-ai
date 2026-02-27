@@ -4,6 +4,7 @@
 import asyncio
 import asyncio.queues
 import logging
+import time
 from collections import defaultdict
 from typing import Any, Dict, List, NoReturn, Optional, TypeVar, cast
 from uuid import UUID
@@ -112,6 +113,8 @@ class RemoteWorkflowRunner(WorkflowRunner):
         pubsubname: Optional[str] = None,
         source: Optional[str] = None,
         topic: Optional[str] = None,
+        heartbeat_tracker: Optional[Dict[str, float]] = None,
+        heartbeat_timeout_s: float = 60.0,
         **kwargs: Any,
     ):
         super().__init__(
@@ -126,6 +129,8 @@ class RemoteWorkflowRunner(WorkflowRunner):
         self.message_router = message_router
         self.traceid = traceid
         self.id_queue_map: Dict[str, "asyncio.queues.Queue[WorkMessage]"] = {}
+        self._heartbeat_tracker = heartbeat_tracker or {}
+        self._heartbeat_timeout_s = heartbeat_timeout_s
 
     def _handle_failure(self, request: ExecuteRequestMessage, reply: WorkMessage) -> NoReturn:
         content = cast(ErrorContent, reply.content)
@@ -215,6 +220,23 @@ class RemoteWorkflowRunner(WorkflowRunner):
                 await asyncio.sleep(SLEEP_S)
                 if self.is_cancelled:
                     raise CancelledOpError()
+                # Check heartbeat staleness
+                if self._heartbeat_tracker is not None:
+                    op_name = request.content.operation_spec.name
+                    run_id = request.run_id
+                    key = f"{run_id}:{op_name}"
+                    last_hb = self._heartbeat_tracker.get(key)
+                    if last_hb is not None:
+                        elapsed = time.time() - last_hb
+                        if elapsed > self._heartbeat_timeout_s:
+                            from datetime import datetime, timezone
+
+                            last_dt = datetime.fromtimestamp(last_hb, tz=timezone.utc)
+                            raise RuntimeError(
+                                f"Op '{op_name}' has not reported progress for "
+                                f"{elapsed:.0f}s. Last heartbeat at "
+                                f"{last_dt.isoformat()}."
+                            )
 
     @add_trace
     async def _run_op_impl(
