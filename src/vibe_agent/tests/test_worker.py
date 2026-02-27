@@ -48,7 +48,7 @@ async def test_messenger_send_succeeds_after_transient_failure():
 
 @pytest.mark.anyio
 async def test_messenger_send_respects_deadline():
-    """When deadline is in the past, send() gives up immediately."""
+    """Deadline already past → give up before ever calling send_async."""
     import time
 
     messenger = WorkerMessenger()
@@ -56,9 +56,11 @@ async def test_messenger_send_respects_deadline():
     messenger.retry_interval_s = 0.01
     messenger.deadline = time.monotonic() - 1.0  # already expired
 
-    with patch("vibe_agent.worker.send_async", new=AsyncMock(return_value=False)):
+    mock_send = AsyncMock(return_value=False)
+    with patch("vibe_agent.worker.send_async", new=mock_send):
         with pytest.raises(RuntimeError, match="deadline"):
             await messenger.send(MagicMock())
+    mock_send.assert_not_called()  # bailed at the gate, no wasted attempt
 
 
 # --- Drain-and-requeue shutdown (Task 7) ---
@@ -137,7 +139,7 @@ def _mock_content(op_name="test_op"):
 
 
 def test_oom_exitcode_produces_factual_error_and_no_retry(worker: Worker):
-    """SIGKILL exit → factual error with memory stats; no retry (same input, same result)."""
+    """SIGKILL exit → error names the op, signal, exit code, memory. No retry."""
     oom_exc = ProcessExpired("Abnormal termination")
     oom_exc.exitcode = -9
     worker.try_run_op = MagicMock(side_effect=oom_exc)
@@ -146,11 +148,19 @@ def test_oom_exitcode_produces_factual_error_and_no_retry(worker: Worker):
         mock_mem.return_value = MagicMock(
             __str__=lambda self: "4096MB / 4096MB (100%)"
         )
-        with pytest.raises(RuntimeError, match="SIGKILL.*exit code -9"):
+        with pytest.raises(RuntimeError) as exc_info:
             worker.run_op_with_retry(
                 _mock_content("download_s2"), run_id=MagicMock(), timeout_s=30
             )
 
+    msg = str(exc_info.value)
+    # Every factual claim is present; no speculation/guidance.
+    assert "download_s2" in msg
+    assert "SIGKILL" in msg
+    assert "exit code -9" in msg
+    assert "4096MB" in msg and "100%" in msg
+    assert "likely" not in msg.lower()  # regression guard: factual-only
+    assert "consider" not in msg.lower()
     assert worker.try_run_op.call_count == 1  # no retry on OOM
 
 
@@ -174,40 +184,50 @@ import traceback as tb
 
 
 def test_retry_sleeps_with_backoff_between_attempts(worker: Worker):
-    """Failed attempts sleep with increasing delay between tries."""
+    """Backoff: compute_backoff called once per gap with correct attempt index and
+    the worker's configured policy; _interruptible_sleep receives the exact delays."""
     worker.max_tries = 3
-    worker.op_retry_base_delay_s = 0.01
-    worker.op_retry_max_delay_s = 1.0
+    worker.op_retry_base_delay_s = 0.5
+    worker.op_retry_max_delay_s = 10.0
 
     fake_tb = tb.TracebackException(ValueError, ValueError("transient"), None)
     worker.try_run_op = MagicMock(return_value=fake_tb)
 
+    # Return deterministic delays so we can verify wiring end-to-end.
+    # compute_backoff's own math is covered in vibe_common/tests/test_retry.py.
+    planned_delays = [0.5, 1.0]  # indexed by attempt
+    def fake_backoff(attempt, policy):
+        assert policy.base_delay_s == 0.5
+        assert policy.max_delay_s == 10.0
+        return planned_delays[attempt]
+
     sleep_calls = []
-    def capture_sleep(s):
-        sleep_calls.append(s)
-    with patch.object(worker, "_interruptible_sleep", side_effect=capture_sleep):
+    with patch("vibe_agent.worker.compute_backoff", side_effect=fake_backoff) as mock_cb, \
+         patch.object(worker, "_interruptible_sleep", side_effect=sleep_calls.append):
         with pytest.raises(RuntimeError):
             worker.run_op_with_retry(_mock_content(), run_id=MagicMock(), timeout_s=30)
 
-    # 3 tries → 2 backoff gaps
-    assert len(sleep_calls) == 2
-    # With base=0.01, exp=2, max=1.0 — delays capped and jittered, always ≤ cap
-    assert all(0 <= d <= 1.0 for d in sleep_calls)
+    # 3 tries → 2 gaps; attempt indices 0, 1
+    assert [c.args[0] for c in mock_cb.call_args_list] == [0, 1]
+    # Sleep durations are exactly what compute_backoff returned.
+    assert sleep_calls == planned_delays
 
 
 def test_retry_backoff_abandoned_on_shutdown(worker: Worker):
-    """Top-of-loop shutdown check bails before entering another try + sleep."""
+    """Shutdown set before first iteration → bail at top of loop; never attempt the op."""
     worker.max_tries = 3
     worker.op_retry_base_delay_s = 10.0
     worker.op_retry_max_delay_s = 10.0
     worker.shutting_down = True
+    worker.try_run_op = MagicMock()
 
     start = time.monotonic()
     with pytest.raises(ShuttingDownException):
         worker.run_op_with_retry(_mock_content(), run_id=MagicMock(), timeout_s=30)
     elapsed = time.monotonic() - start
 
-    assert elapsed < 1.0
+    worker.try_run_op.assert_not_called()  # top-of-loop check fires before any attempt
+    assert elapsed < 0.1  # no backoff sleep happened
 
 
 # --- Memory pressure warning + heartbeat (Task 10) ---
@@ -217,12 +237,12 @@ import logging
 
 
 def test_memory_pressure_warning_logged_once(worker: Worker, caplog):
-    """Usage > 85% → log WARNING once per crossing, don't spam every poll."""
+    """Usage > 85% → log WARNING once per crossing with stats; don't spam every poll."""
     worker.current_message = MagicMock()
     worker.is_workflow_complete = MagicMock(return_value=False)
 
     mock_child = MagicMock()
-    # Two timeout polls then success
+    # Two timeout polls then success — warning should fire on poll 1, not poll 2.
     mock_child.result.side_effect = [
         concurrent.futures.TimeoutError(),
         concurrent.futures.TimeoutError(),
@@ -236,17 +256,20 @@ def test_memory_pressure_warning_logged_once(worker: Worker, caplog):
         worker.get_future_result(mock_child, monitoring_period_s=0.01, timeout_s=30)
 
     warnings = [r for r in caplog.records if "high memory" in r.message.lower()]
-    assert len(warnings) == 1  # one-shot, not two
+    assert len(warnings) == 1  # one-shot across 2 polls
+    # Factual content: actual numbers in the log line, not just a label.
+    assert "3700MB" in warnings[0].message
+    assert "92%" in warnings[0].message
 
 
 def test_heartbeat_sent_during_long_op(worker: Worker):
-    """Heartbeat published while subprocess is still running (poll-timeout branch)."""
+    """One heartbeat per poll-timeout (interval=0); payload carries op_name, elapsed, memory."""
     worker.current_message = MagicMock()
     worker.current_message.id = "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
     worker.current_message.content = MagicMock()
     worker.current_message.content.operation_spec.name = "long_op"
     worker.is_workflow_complete = MagicMock(return_value=False)
-    worker.heartbeat_interval_s = 0.0  # fire every poll
+    worker.heartbeat_interval_s = 0.0  # fire on every poll
 
     mock_child = MagicMock()
     mock_child.result.side_effect = [
@@ -263,9 +286,15 @@ def test_heartbeat_sent_during_long_op(worker: Worker):
     low_mem = MagicMock(usage_fraction=0.10, usage_mb=100.0, limit_mb=1000.0)
     with patch("vibe_agent.worker.send_async", new=capture_send), \
          patch("vibe_agent.worker.get_memory_info", return_value=low_mem):
-        worker.get_future_result(mock_child, monitoring_period_s=0.01, timeout_s=30)
+        result = worker.get_future_result(mock_child, monitoring_period_s=0.01, timeout_s=30)
+
+    assert result == {"done": True}
 
     from vibe_common.messaging import HeartbeatMessage
     heartbeats = [m for m in sent_messages if isinstance(m, HeartbeatMessage)]
-    assert len(heartbeats) >= 1
-    assert heartbeats[0].content.op_name == "long_op"
+    assert len(heartbeats) == 2  # interval=0 → one per timeout-poll, exactly
+    for hb in heartbeats:
+        assert hb.content.op_name == "long_op"
+        assert hb.content.elapsed_s >= 0.0
+        assert hb.content.memory_usage_mb == 100.0
+        assert hb.content.memory_limit_mb == 1000.0
