@@ -27,6 +27,8 @@ from pebble.common import ProcessExpired
 
 from vibe_common.constants import CONTROL_STATUS_PUBSUB, STATUS_PUBSUB_TOPIC
 from vibe_common.dapr import dapr_ready
+from vibe_common.resources import get_memory_info, is_oom_exitcode
+from vibe_common.retry import RetryPolicy, compute_backoff
 from vibe_common.messaging import (
     CacheInfoExecuteRequestContent,
     CacheInfoExecuteRequestMessage,
@@ -53,8 +55,15 @@ from .ops import OperationFactoryConfig, OperationSpec
 
 MESSAGING_RETRY_INTERVAL_S = 1
 MESSAGING_MAX_SEND_ATTEMPTS = 60  # ~1 minute cap; worker doesn't hang forever
-TERMINATION_GRACE_PERIOD_S = 5
+# Time an in-progress op gets to finish naturally after SIGTERM before we
+# force-cancel it. Must be less than the pod's terminationGracePeriodSeconds
+# (set in worker.tf) so there's headroom to flush status before K8s SIGKILLs us.
+TERMINATION_GRACE_PERIOD_S = 90
 MAX_OP_EXECUTION_TIME_S = 60 * 60 * 3
+OP_RETRY_BASE_DELAY_S = 2.0
+OP_RETRY_MAX_DELAY_S = 60.0
+MEMORY_WARNING_THRESHOLD = 0.85
+HEARTBEAT_INTERVAL_S = 30
 
 
 class ShuttingDownException(Exception):
@@ -242,6 +251,7 @@ class Worker:
     control_topic: str
     current_message: Optional[WorkMessage] = None
     shutting_down: bool = False
+    shutdown_deadline: Optional[float] = None
     child_monitoring_period_s: int = 10
     termination_grace_period_s: int = 2
     state_store: StateStore
@@ -263,6 +273,9 @@ class Worker:
         log_backup_count: int = LOG_BACKUP_COUNT,
         loglevel: Optional[str] = None,
         otel_service_name: str = "",
+        op_retry_base_delay_s: float = OP_RETRY_BASE_DELAY_S,
+        op_retry_max_delay_s: float = OP_RETRY_MAX_DELAY_S,
+        heartbeat_interval_s: float = HEARTBEAT_INTERVAL_S,
         **kwargs: Dict[str, Any],
     ):
         self.pubsubname = pubsubname
@@ -276,6 +289,9 @@ class Worker:
         self.max_log_file_bytes = max_log_file_bytes
         self.log_backup_count = log_backup_count
         self.otel_service_name = otel_service_name
+        self.op_retry_base_delay_s = op_retry_base_delay_s
+        self.op_retry_max_delay_s = op_retry_max_delay_s
+        self.heartbeat_interval_s = heartbeat_interval_s
 
         self.app = App()
         self.messenger = WorkerMessenger(pubsubname, status_topic)
@@ -298,6 +314,14 @@ class Worker:
                     "probably because it terminated already"
                 )
 
+    def _interruptible_sleep(self, total_s: float):
+        """Sleep in ≤1s slices so SIGTERM can interrupt a long backoff."""
+        end = time.monotonic() + total_s
+        while time.monotonic() < end:
+            if self.shutting_down:
+                raise ShuttingDownException()
+            time.sleep(min(1.0, max(0.0, end - time.monotonic())))
+
     def _setup_routes_and_events(self):
         @self.app.subscribe(self.pubsubname, self.control_topic)
         def fetch_work(event: v1.Event) -> TopicEventResponse:
@@ -310,21 +334,40 @@ class Worker:
             return TopicEventResponse("retry")
 
     def pre_stop_hook(self, signum: int, _: Any):
-        self.shutdown_lock.acquire()
-        if self.shutting_down:
-            self.logger.warning(
-                f"Shutdown requested while already shutting down. Ignoring. (signal: {signum})"
+        """Initiate drain-and-requeue shutdown.
+
+        We set the deadline and let get_future_result() decide whether to
+        cancel. If the op finishes before the deadline, its result is
+        delivered normally and no work is lost. If the deadline passes,
+        get_future_result() cancels the child and raises ShuttingDownException,
+        which fetch_work() turns into TopicEventResponse("retry") for redelivery.
+        """
+        with self.shutdown_lock:
+            if self.shutting_down:
+                self.logger.warning(
+                    f"Shutdown already in progress. Ignoring signal {signum}."
+                )
+                return
+            self.shutting_down = True
+            self.shutdown_deadline = time.monotonic() + self.termination_grace_period_s
+            # Messenger learns the deadline so status-message sends don't
+            # overrun the grace period.
+            self.messenger.deadline = self.shutdown_deadline
+            self.logger.info(
+                f"SIGTERM received. Draining: current op has "
+                f"{self.termination_grace_period_s}s to finish naturally."
             )
-            self.shutdown_lock.release()
-            return
-        self.shutting_down = True
-        try:
-            if self.current_message is not None:
-                self._terminate_child()
-        finally:
-            if self.app._server is not None:
-                self.app._server.stop(None)
-            self.shutdown_lock.release()
+            # Stop the gRPC server only after the current fetch_work returns
+            # — otherwise we can't deliver the TopicEventResponse.
+            threading.Thread(target=self._wait_and_stop_server, daemon=True).start()
+
+    def _wait_and_stop_server(self):
+        """Blocks until work_lock is free (op done), then stops the gRPC server."""
+        self.work_lock.acquire()
+        self.work_lock.release()
+        self.logger.info("Drain complete. Stopping gRPC server.")
+        if self.app._server is not None:
+            self.app._server.stop(None)
 
     def run(self):
         appname = "terravibes-worker"
@@ -372,7 +415,7 @@ class Worker:
         try:
             run = asyncio.run(self.statestore.retrieve(str(message.run_id)))
         except KeyError:
-            self.logger.warn(
+            self.logger.warning(
                 f"Run {message.run_id} not found in statestore. Assuming it's not complete."
             )
             return False
@@ -428,14 +471,16 @@ class Worker:
         self, child: ProcessFuture, monitoring_period_s: int, timeout_s: float
     ) -> Any:
         start_time = time.time()
+        start_mono = time.monotonic()
+        last_heartbeat_mono = start_mono
+        mem_warning_fired = False
+
         while time.time() - start_time < timeout_s:
             try:
-                ret = child.result(monitoring_period_s)
-                return ret
+                return child.result(monitoring_period_s)
             except concurrent.futures.TimeoutError:
                 assert self.current_message is not None, (
-                    "There's a correctness issue in the worker code. "
-                    "`current_message` should not be `None`."
+                    "Correctness issue: current_message should not be None here."
                 )
                 if self.is_workflow_complete(self.current_message):
                     self.logger.info(
@@ -444,26 +489,74 @@ class Worker:
                     )
                     child.cancel()
                     raise RuntimeError(
-                        "Workflow was completed/failed/cancelled while running op. "
-                        "Terminating child process."
+                        "Workflow was completed/failed/cancelled while running op."
                     )
                 if self.shutting_down:
-                    self.logger.info("Shutdown process initiated. Terminating child process.")
-                    child.cancel()
-                    raise ShuttingDownException()
+                    if self.shutdown_deadline is None or time.monotonic() >= self.shutdown_deadline:
+                        self.logger.warning(
+                            "Shutdown grace period expired. Cancelling child process; "
+                            "message will be redelivered to another worker."
+                        )
+                        child.cancel()
+                        raise ShuttingDownException()
+                    remaining = self.shutdown_deadline - time.monotonic()
+                    self.logger.info(
+                        f"Draining: {remaining:.0f}s remaining for op to finish."
+                    )
+
+                # Memory check — one-shot per crossing, with hysteresis so we
+                # re-arm if usage drops. Factual only; guidance is in docs.
+                mem = get_memory_info()
+                if mem.usage_fraction is not None:
+                    if mem.usage_fraction > MEMORY_WARNING_THRESHOLD:
+                        if not mem_warning_fired:
+                            self.logger.warning(f"High memory usage: {mem}.")
+                            mem_warning_fired = True
+                    elif mem.usage_fraction < MEMORY_WARNING_THRESHOLD - 0.05:
+                        mem_warning_fired = False
+
+                # Heartbeat — best-effort single attempt; failures logged at DEBUG.
+                # Orchestrator consumer is follow-up work.
+                if time.monotonic() - last_heartbeat_mono >= self.heartbeat_interval_s:
+                    last_heartbeat_mono = time.monotonic()
+                    self._send_heartbeat(start_mono, mem)
+
                 continue
             except concurrent.futures.CancelledError:
                 if self.shutting_down:
                     raise ShuttingDownException()
-                self.logger.warn(
-                    f"Child process was cancelled while running op {self.current_message}. "
-                    "But we're not shutting down. This is unexpected."
+                self.logger.warning(
+                    f"Child cancelled while running {self.current_message} "
+                    "but we're not shutting down. Unexpected."
                 )
                 raise
             except Exception as e:
-                self.logger.exception(f"Child process failed with exception {e}")
+                self.logger.exception(f"Child process failed: {e}")
                 return traceback.TracebackException.from_exception(e)
-        raise TimeoutError(f"Op execution took longer than the allowed {timeout_s} seconds.")
+        raise TimeoutError(f"Op execution exceeded {timeout_s} seconds.")
+
+    def _send_heartbeat(self, start_mono: float, mem) -> None:
+        """Fire-and-forget liveness signal to the status topic."""
+        if self.current_message is None:
+            return
+        try:
+            content = cast(CacheInfoExecuteRequestContent, self.current_message.content)
+            op_name = str(content.operation_spec.name)
+        except Exception:
+            op_name = "unknown"
+        elapsed = time.monotonic() - start_mono
+        hb = WorkMessageBuilder.build_heartbeat(
+            self.current_message.id,
+            op_name=op_name,
+            elapsed_s=elapsed,
+            memory_usage_mb=mem.usage_mb,
+            memory_limit_mb=mem.limit_mb,
+        )
+        try:
+            # Single attempt — heartbeats are frequent and cheap, don't retry.
+            asyncio.run(send_async(hb, "worker", self.pubsubname, self.status_topic))
+        except Exception as e:
+            self.logger.debug(f"Heartbeat send failed (ignored): {e}")
 
     @add_trace
     def try_run_op(
@@ -493,24 +586,48 @@ class Worker:
             f"for at most {self.max_tries} tries in child process."
         )
         final_time = time.time() + timeout_s
+        retry_policy = RetryPolicy(
+            max_attempts=self.max_tries,
+            base_delay_s=self.op_retry_base_delay_s,
+            max_delay_s=self.op_retry_max_delay_s,
+            jitter=True,
+        )
         for i in range(self.max_tries):
             inner_timeout = final_time - time.time()
             if self.shutting_down:
-                self.logger.info(
-                    "Stopping execution of op because the shutdown process has been initiated."
-                )
+                self.logger.info("Stopping op retry loop — shutdown in progress.")
                 raise ShuttingDownException()
+            attempt_failed = False
             try:
                 ret = self.try_run_op(spec, content, inner_timeout)
                 if not isinstance(ret, traceback.TracebackException):
-                    self.logger.debug(f"Op {spec} ran successfully on try {i+1} (run id: {run_id})")
+                    self.logger.debug(
+                        f"Op {spec} ran successfully on try {i+1} (run id: {run_id})"
+                    )
                     break
+                attempt_failed = True
                 self.logger.error(
                     f"Failed to run op {spec} with input {get_input_ids(content.input)} "
-                    f"in subprocess. (try {i+1}/{self.max_tries}) {''.join(ret.format())}"
+                    f"in subprocess (try {i+1}/{self.max_tries}): {''.join(ret.format())}"
                 )
-            except ProcessExpired:
-                self.logger.exception(f"pebble child process failed on try {i+1}/{self.max_tries}")
+            except ProcessExpired as e:
+                exitcode = getattr(e, "exitcode", None)
+                if exitcode is not None and is_oom_exitcode(exitcode):
+                    # SIGKILL in a container is the OOM killer. Don't retry —
+                    # same input will produce the same result. Guidance for
+                    # operators is in TROUBLESHOOTING.md, not the error message.
+                    mem = get_memory_info()
+                    msg = (
+                        f"Op {spec.name!r} subprocess terminated by SIGKILL "
+                        f"(exit code {exitcode}). Memory at termination: {mem}."
+                    )
+                    self.logger.error(msg)
+                    raise RuntimeError(msg) from e
+                attempt_failed = True
+                self.logger.exception(
+                    f"Op {spec.name!r}: subprocess died "
+                    f"(exit code {exitcode}) on try {i+1}/{self.max_tries}. Retrying."
+                )
             except TimeoutError as e:
                 msg = (
                     f"Op execution timed out on try {i+1}/{self.max_tries}. "
@@ -519,6 +636,15 @@ class Worker:
                 )
                 self.logger.exception(msg)
                 raise RuntimeError(msg) from e
+
+            if attempt_failed and i + 1 < self.max_tries:
+                delay = compute_backoff(i, retry_policy)
+                self.logger.warning(
+                    f"Op {spec.name!r}: backing off {delay:.1f}s before "
+                    f"try {i+2}/{self.max_tries}."
+                )
+                self._interruptible_sleep(delay)
+
         self.current_child = None
         if isinstance(ret, traceback.TracebackException):
             raise RuntimeError("".join(ret.format()))
@@ -533,6 +659,9 @@ WorkerConfig = builds(
     status_topic=STATUS_PUBSUB_TOPIC,
     max_tries=5,
     termination_grace_period_s=TERMINATION_GRACE_PERIOD_S,
+    op_retry_base_delay_s=OP_RETRY_BASE_DELAY_S,
+    op_retry_max_delay_s=OP_RETRY_MAX_DELAY_S,
+    heartbeat_interval_s=HEARTBEAT_INTERVAL_S,
     factory_spec=OperationFactoryConfig,
     zen_partial=False,
     hydra_recursive=False,
