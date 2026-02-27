@@ -9,6 +9,8 @@ locals {
       "worker=${var.startup_type}",
       "worker.impl.control_topic=commands",
       "worker.impl.port=3000",
+      # Internal grace = pod grace - 30s buffer for status flush + Dapr sidecar drain.
+      "worker.impl.termination_grace_period_s=${var.worker_termination_grace_period_s - 30}",
     ],
     var.otel_service_name != "" ?
     [
@@ -70,6 +72,7 @@ resource "kubernetes_deployment" "worker" {
       }
 
       spec {
+        termination_grace_period_seconds = var.worker_termination_grace_period_s
         node_selector = {
           agentpool = var.worker_node_pool_name
         }
