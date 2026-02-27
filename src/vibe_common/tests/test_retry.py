@@ -1,8 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+from unittest.mock import MagicMock
+
 import pytest
-from vibe_common.retry import RetryPolicy, compute_backoff
+from vibe_common.retry import RetryPolicy, compute_backoff, with_retry
 
 
 def test_backoff_grows_exponentially():
@@ -37,8 +39,15 @@ def test_retryable_predicate_custom():
     assert not p.retryable(ValueError())
 
 
-from unittest.mock import MagicMock
-from vibe_common.retry import with_retry
+def test_backoff_handles_huge_attempt_without_overflow():
+    p = RetryPolicy(base_delay_s=1.0, exponential_base=2.0, max_delay_s=60.0, jitter=False)
+    # 2.0 ** 10000 would overflow; should cap gracefully
+    assert compute_backoff(10_000, p) == 60.0
+
+
+def test_retry_policy_rejects_zero_attempts():
+    with pytest.raises(ValueError, match="max_attempts must be >= 1"):
+        RetryPolicy(max_attempts=0)
 
 
 def test_with_retry_returns_on_first_success():

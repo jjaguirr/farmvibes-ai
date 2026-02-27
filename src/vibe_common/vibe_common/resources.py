@@ -22,6 +22,8 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
+__all__ = ["MemoryInfo", "get_memory_info", "is_oom_exitcode"]
+
 logger = logging.getLogger(__name__)
 
 # cgroup v1 reports a near-2^63 value when unlimited. Anything bigger than
@@ -47,11 +49,13 @@ class MemoryInfo:
 
     @property
     def limit_mb(self) -> Optional[float]:
-        return self.limit_bytes / (1024 * 1024) if self.limit_bytes else None
+        if self.limit_bytes is None:
+            return None
+        return self.limit_bytes / (1024 * 1024)
 
     @property
     def usage_fraction(self) -> Optional[float]:
-        if not self.limit_bytes:
+        if self.limit_bytes is None or self.limit_bytes == 0:
             return None
         return self.usage_bytes / self.limit_bytes
 
@@ -95,17 +99,21 @@ def get_memory_info() -> MemoryInfo:
     Prefers cgroup v2, falls back to v1, falls back to /proc/self/status RSS
     with no limit. Never raises — returns MemoryInfo(None, 0) in the worst case.
     """
-    if os.path.exists(_CGROUP_V2_LIMIT) and os.path.exists(_CGROUP_V2_USAGE):
-        limit = _read_int(_CGROUP_V2_LIMIT)
-        usage = _read_int(_CGROUP_V2_USAGE) or 0
-        return MemoryInfo(limit_bytes=limit, usage_bytes=usage)
+    try:
+        if os.path.exists(_CGROUP_V2_LIMIT) and os.path.exists(_CGROUP_V2_USAGE):
+            limit = _read_int(_CGROUP_V2_LIMIT)
+            usage = _read_int(_CGROUP_V2_USAGE) or 0
+            return MemoryInfo(limit_bytes=limit, usage_bytes=usage)
 
-    if os.path.exists(_CGROUP_V1_LIMIT) and os.path.exists(_CGROUP_V1_USAGE):
-        limit = _read_int(_CGROUP_V1_LIMIT)
-        usage = _read_int(_CGROUP_V1_USAGE) or 0
-        return MemoryInfo(limit_bytes=limit, usage_bytes=usage)
+        if os.path.exists(_CGROUP_V1_LIMIT) and os.path.exists(_CGROUP_V1_USAGE):
+            limit = _read_int(_CGROUP_V1_LIMIT)
+            usage = _read_int(_CGROUP_V1_USAGE) or 0
+            return MemoryInfo(limit_bytes=limit, usage_bytes=usage)
 
-    return MemoryInfo(limit_bytes=None, usage_bytes=_read_proc_rss())
+        return MemoryInfo(limit_bytes=None, usage_bytes=_read_proc_rss())
+    except Exception as e:
+        logger.debug(f"get_memory_info failed: {e}")
+        return MemoryInfo(limit_bytes=None, usage_bytes=0)
 
 
 def is_oom_exitcode(exitcode: int) -> bool:

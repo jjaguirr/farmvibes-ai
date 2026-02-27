@@ -22,10 +22,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional, TypeVar, cast
 
+__all__ = ["RetryPolicy", "compute_backoff", "with_retry"]
+
 T = TypeVar("T")
 
 
-def _default_retryable(e: BaseException) -> bool:
+def _default_retryable(e: Exception) -> bool:
     return True
 
 
@@ -48,7 +50,11 @@ class RetryPolicy:
     max_delay_s: float = 30.0
     exponential_base: float = 2.0
     jitter: bool = True
-    retryable: Callable[[BaseException], bool] = field(default=_default_retryable)
+    retryable: Callable[[Exception], bool] = field(default=_default_retryable)
+
+    def __post_init__(self) -> None:
+        if self.max_attempts < 1:
+            raise ValueError(f"max_attempts must be >= 1, got {self.max_attempts}")
 
 
 def compute_backoff(attempt: int, policy: RetryPolicy) -> float:
@@ -56,7 +62,12 @@ def compute_backoff(attempt: int, policy: RetryPolicy) -> float:
 
     `attempt` is zero-indexed: attempt=0 → delay after the first failure.
     """
-    raw = policy.base_delay_s * (policy.exponential_base ** attempt)
+    if attempt < 0:
+        attempt = 0
+    try:
+        raw = policy.base_delay_s * (policy.exponential_base ** attempt)
+    except OverflowError:
+        raw = policy.max_delay_s
     capped = min(raw, policy.max_delay_s)
     if policy.jitter:
         return random.uniform(0, capped)

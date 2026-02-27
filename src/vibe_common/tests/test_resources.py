@@ -113,3 +113,25 @@ def test_get_memory_info_cgroup_v1_huge_limit_treated_as_unlimited():
          patch("builtins.open", side_effect=fake_open):
         info = get_memory_info()
         assert info.limit_bytes is None
+
+
+def test_get_memory_info_proc_fallback():
+    proc_status = (
+        "Name:\tworker\n"
+        "VmPeak:\t  200000 kB\n"
+        "VmRSS:\t  150000 kB\n"
+        "VmSwap:\t       0 kB\n"
+    )
+    with patch("os.path.exists", return_value=False), \
+         patch("builtins.open", mock_open(read_data=proc_status)):
+        info = get_memory_info()
+        assert info.limit_bytes is None
+        assert info.usage_bytes == 150000 * 1024
+
+
+def test_get_memory_info_never_raises_on_filesystem_error():
+    # os.path.exists can raise PermissionError during container teardown
+    with patch("os.path.exists", side_effect=PermissionError("cgroup fs gone")):
+        info = get_memory_info()
+        assert info.limit_bytes is None
+        assert info.usage_bytes == 0

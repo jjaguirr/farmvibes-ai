@@ -24,7 +24,17 @@ try:
         "fake_workflows_dir",
         "anyio_backend",
     ]
-except ImportError:
+except ModuleNotFoundError as e:
+    # Tolerate only the expected "vibe_dev infrastructure unavailable" case —
+    # either vibe_dev itself is missing, or one of its transitive deps is missing
+    # while vibe_dev was mid-import. Any other missing module is a real failure.
+    import traceback
+
+    _in_vibe_dev_chain = any(
+        "vibe_dev" in frame.filename for frame in traceback.extract_tb(e.__traceback__)
+    )
+    if not (e.name and e.name.startswith("vibe_dev")) and not _in_vibe_dev_chain:
+        raise  # real missing dep, not the expected "vibe_dev not installed"
     import pytest
 
     @pytest.fixture
