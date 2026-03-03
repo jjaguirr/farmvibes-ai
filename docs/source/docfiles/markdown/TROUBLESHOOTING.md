@@ -150,25 +150,32 @@ that are currently being addressed by the development team.
     </details>
 
     <details>
-    <summary> Tasks fail with "Abnormal Termination"</summary>
+    <summary> Tasks fail with "subprocess terminated by SIGKILL"</summary>
 
-    Some workflows, such as the SpaceEye workflow (in the
-    `preprocess.s1.preprocess`) or the Segment Anything Model (SAM) workflow
-    might use a large amount of memory depending on the input area and/or time
-    range used for processing. When that's the case, the Operating System might
-    terminate the offending task, failing it and the workflow.
+    Some workflows (notably SpaceEye and Segment Anything Model) can use a large
+    amount of memory depending on the input area and time range. When the
+    container exceeds its cgroup memory limit, the kernel OOM-killer sends
+    SIGKILL to the offending subprocess and the workflow fails with an error
+    like:
 
-    When inspecting the error reason, users might find a text that says `...
-    ProcessExpired: Abnormal termination`.
+    ```
+    Op '<name>' subprocess terminated by SIGKILL (exit code -9). Memory at termination: 4096MB / 4096MB (100%).
+    ```
 
-    One solution is to request processing of a smaller region.
+    **What to do:**
 
-    Another solution is to scale down the number of workers with the command
-    `~/.config/farmvibes-ai/kubectl scale deployment terravibes-worker
-    --replicas=1`.
+  - **Reduce input size** — smaller region of interest, shorter time range, fewer bands.
+  - **Scale down worker replicas** so each gets more of the node's memory:
+    ```bash
+    ~/.config/farmvibes-ai/kubectl scale deployment terravibes-worker --replicas=1
+    ```
+  - **Increase the worker memory request** via the `worker_memory_request`
+    Terraform variable (default `8Gi`), then re-apply.
+  - If the machine itself lacks RAM, migrate the cluster to a larger node.
 
-    If, even when doing the above, the task still fails, the Kubernetes cluster
-    might need to be migrated to a machine with more RAM.
+    **Earlier versions** showed `ProcessExpired: Abnormal termination` for the
+    same cause — the worker now reports the actual signal and memory stats so
+    you don't have to guess.
 
     </details>
 

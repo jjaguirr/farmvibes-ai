@@ -96,3 +96,8 @@ variable "environment" {
   description = "Unused"
   default = ""
 }
+
+variable "worker_termination_grace_period_s" {
+  description = "Pod terminationGracePeriodSeconds for the worker deployment. Must exceed the worker's internal termination_grace_period_s (default 90s) by ~30s to leave headroom for status flush and Dapr sidecar drain before Kubernetes sends SIGKILL."
+  default     = 120
+}

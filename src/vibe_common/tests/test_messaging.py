@@ -154,3 +154,54 @@ def test_refuse_to_encode_message_with_invalid_values(workflow_execution_message
         content.input["plain_input"]["data"] = [{"a": value}]  # type: ignore
         with pytest.raises(ValueError):
             workflow_execution_message.to_cloud_event("test")
+
+
+# --- Heartbeat message (Task 11 worker hardening) ---
+
+from uuid import uuid4
+from vibe_common.constants import STATUS_PUBSUB_TOPIC
+from vibe_common.messaging import (
+    HeartbeatContent,
+    HeartbeatMessage,
+    WorkMessageBuilder,
+    gen_traceparent,
+)
+
+
+@pytest.fixture
+def heartbeat_traceparent() -> str:
+    # Standalone traceparent — no vibe_dev fixture dependency
+    return gen_traceparent(uuid4())
+
+
+def test_heartbeat_message_construction(heartbeat_traceparent: str):
+    msg = WorkMessageBuilder.build_heartbeat(
+        heartbeat_traceparent,
+        op_name="download_sentinel2",
+        elapsed_s=42.5,
+        memory_usage_mb=1024.0,
+        memory_limit_mb=4096.0,
+    )
+    assert isinstance(msg, HeartbeatMessage)
+    assert msg.header.type == MessageType.heartbeat
+    assert msg.content.op_name == "download_sentinel2"
+    assert msg.content.elapsed_s == 42.5
+    assert msg.content.memory_usage_mb == 1024.0
+    assert msg.content.memory_limit_mb == 4096.0
+
+
+def test_heartbeat_valid_on_status_channel(heartbeat_traceparent: str):
+    msg = WorkMessageBuilder.build_heartbeat(
+        heartbeat_traceparent, "op", 1.0, None, None
+    )
+    assert msg.is_valid_for_channel(STATUS_PUBSUB_TOPIC)
+
+
+def test_heartbeat_roundtrip_through_build_work_message(heartbeat_traceparent: str):
+    """Verify heartbeat survives the generic dispatch path."""
+    original = WorkMessageBuilder.build_heartbeat(
+        heartbeat_traceparent, "op", 10.0, 512.0, 2048.0
+    )
+    rebuilt = build_work_message(header=original.header, content=original.content)
+    assert isinstance(rebuilt, HeartbeatMessage)
+    assert rebuilt.content.op_name == "op"

@@ -70,6 +70,7 @@ MessageContent = Union[
     "EvictedReplyContent",
     "WorkflowCancellationContent",
     "WorkflowDeletionContent",
+    "HeartbeatContent",
 ]
 ValidVersion = Literal["1.0"]
 
@@ -89,6 +90,7 @@ class MessageType(StrEnum):
     workflow_execution_request = auto()
     workflow_cancellation_request = auto()
     workflow_deletion_request = auto()
+    heartbeat = auto()
 
 
 class BaseModel(PyBaseModel):
@@ -142,6 +144,19 @@ class ExecuteReplyContent(BaseModel):
 
 class AckContent(BaseModel):
     pass
+
+
+class HeartbeatContent(BaseModel):
+    """Periodic liveness signal from worker while an op runs.
+
+    The orchestrator consumer is future work — for now this is fire-and-forget
+    so operators can grep logs and so we don't need to break protocol later.
+    """
+
+    op_name: str
+    elapsed_s: float
+    memory_usage_mb: Optional[float] = None
+    memory_limit_mb: Optional[float] = None
 
 
 class EvictedReplyContent(BaseModel):
@@ -293,6 +308,11 @@ class AckMessage(BaseMessage):
     content: AckContent
 
 
+class HeartbeatMessage(BaseMessage):
+    _supported_channels: Set[str] = {STATUS_PUBSUB_TOPIC}
+    content: HeartbeatContent
+
+
 WorkMessage = Union[
     AckMessage,
     CacheInfoExecuteRequestMessage,
@@ -303,6 +323,7 @@ WorkMessage = Union[
     WorkflowExecutionMessage,
     WorkflowCancellationMessage,
     WorkflowDeletionMessage,
+    HeartbeatMessage,
 ]
 
 
@@ -392,6 +413,26 @@ class WorkMessageBuilder:
         content = AckContent()
         return AckMessage(header=header, content=content)
 
+    @staticmethod
+    def build_heartbeat(
+        traceparent: str,
+        op_name: str,
+        elapsed_s: float,
+        memory_usage_mb: Optional[float],
+        memory_limit_mb: Optional[float],
+    ) -> WorkMessage:
+        run_id = run_id_from_traceparent(traceparent)
+        header = MessageHeader(
+            type=MessageType.heartbeat, run_id=run_id, parent_id=traceparent
+        )
+        content = HeartbeatContent(
+            op_name=op_name,
+            elapsed_s=elapsed_s,
+            memory_usage_mb=memory_usage_mb,
+            memory_limit_mb=memory_limit_mb,
+        )
+        return HeartbeatMessage(header=header, content=content)
+
 
 MESSAGE_TYPE_TO_CONTENT_TYPE: Dict[MessageType, Type[MessageContent]] = {
     MessageType.ack: AckContent,
@@ -403,6 +444,7 @@ MESSAGE_TYPE_TO_CONTENT_TYPE: Dict[MessageType, Type[MessageContent]] = {
     MessageType.workflow_execution_request: WorkflowExecutionContent,
     MessageType.workflow_cancellation_request: WorkflowCancellationContent,
     MessageType.workflow_deletion_request: WorkflowDeletionContent,
+    MessageType.heartbeat: HeartbeatContent,
 }
 
 

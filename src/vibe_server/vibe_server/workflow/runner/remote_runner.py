@@ -199,6 +199,11 @@ class RemoteWorkflowRunner(WorkflowRunner):
             if reply.header.type == MessageType.ack:
                 await self._handle_ack_message(op.name, subtask_idx)
                 continue
+            elif reply.header.type == MessageType.heartbeat:
+                # Liveness signal from worker — full orchestrator-side consumer
+                # is follow-up work. For now just don't crash on receipt.
+                self.message_router.task_done(request.id)
+                continue
             elif reply.header.type in (MessageType.execute_reply, MessageType.error):
                 try:
                     return self._process_reply(request, reply)
