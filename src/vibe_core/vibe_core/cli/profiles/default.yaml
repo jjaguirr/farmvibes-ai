@@ -1,0 +1,75 @@
+# FarmVibes.AI deployment profile: default
+#
+# This file mirrors the hardcoded defaults in vibe_core/cli/config.py exactly.
+# It exists so you can copy it to make custom profiles:
+#
+#   cp default.yaml ~/.config/farmvibes-ai/profiles/mylaptop.yaml
+#   vi ~/.config/farmvibes-ai/profiles/mylaptop.yaml
+#   farmvibes-ai local setup --profile mylaptop
+#
+# Every key below maps directly to a FarmVibesConfig field. Unknown keys are
+# rejected at load time (before Terraform runs).
+#
+# Precedence, lowest to highest:
+#   this file  <  FARMVIBES_* env vars  <  CLI flags
+#
+# Omit a key entirely to fall back to the Python default. Set a key to `null`
+# to explicitly request "no value" (meaningful for *_limit fields — null means
+# the pod gets no resource limit).
+
+# --- Images -----------------------------------------------------------------
+# Container registry and image coordinates. Change these only if you mirror
+# images internally or run a custom build.
+image_registry: "mcr.microsoft.com"
+image_prefix: "farmai/terravibes/"
+image_tag: "12088305617"
+redis_image_repository: "bitnamilegacy/redis"
+redis_image_tag: "7.4.1-debian-12-r2"
+rabbitmq_image_repository: "bitnamilegacy/rabbitmq"
+rabbitmq_image_tag: "4.0.4-debian-12-r1"
+
+# --- Cluster sizing ---------------------------------------------------------
+# worker_replicas: how many worker pods to run. The Python default is computed
+# at runtime as max(1, cpu_count() // 2 - 1). Setting it here pins a fixed
+# number regardless of host CPU count. Comment it out to keep auto-detect.
+# worker_replicas: 3
+
+# max_worker_nodes: AKS (remote) only. Maximum VMs in the worker node pool.
+max_worker_nodes: 3
+
+# --- Worker pod resources ---------------------------------------------------
+# Kubernetes resource requests/limits for worker containers.
+#
+# Memory format: <number><unit>, where unit is Ki, Mi, Gi, Ti (binary) or
+# K, M, G, T (decimal). Examples: "100Mi", "8Gi", "512".
+#
+# CPU format: whole cores ("1", "2"), decimal cores ("0.5"), or millicores
+# ("500m" = half a core). Examples: "500m", "1", "0.5".
+#
+# A request is the guaranteed minimum. A limit is a hard cap (the container is
+# throttled/OOM-killed if exceeded). null means "don't set this" — the pod
+# runs unconstrained, which is the historical FarmVibes behavior.
+worker_memory_request: "100Mi"
+worker_memory_limit: null
+worker_cpu_request: null
+worker_cpu_limit: null
+
+# --- Logging ----------------------------------------------------------------
+# log_level: DEBUG, INFO, WARNING, or ERROR. Applies to all services.
+log_level: "DEBUG"
+
+# max_log_file_bytes / log_backup_count: rotating file logger settings.
+# null = no rotation (files grow unbounded).
+max_log_file_bytes: null
+log_backup_count: null
+
+# enable_telemetry: ship metrics to OpenTelemetry collector. Requires the
+# otel.tf module to be present.
+enable_telemetry: false
+
+# --- Network ----------------------------------------------------------------
+# host/port: where the FarmVibes REST API binds on the host.
+# registry_port: local container registry for k3d image imports.
+host: "127.0.0.1"
+port: 31108
+registry_port: 5000

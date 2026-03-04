@@ -1,0 +1,35 @@
+# FarmVibes.AI deployment profile: production
+#
+# For production-like testing on large machines (32+ cores, 64GB+ RAM). More
+# workers, meaningful resource requests so the scheduler spreads load,
+# hard limits so a runaway job doesn't take the whole node down, quieter logs.
+#
+# Select with:  farmvibes-ai local setup --profile production
+#          or:  FARMVIBES_PROFILE=production farmvibes-ai local setup
+#
+# See default.yaml for the full key reference with per-key documentation.
+
+# Fixed worker count — independent of host CPU count. Pair this with the
+# resource requests below: 8 workers * 500m CPU request = 4 cores guaranteed,
+# 8 workers * 2Gi memory request = 16Gi guaranteed.
+worker_replicas: 8
+
+# Resource requests: what the scheduler guarantees each worker.
+# Resource limits: hard caps enforced by the kernel.
+#
+# A worker that exceeds its memory limit gets OOM-killed and restarted. A
+# worker that exceeds its CPU limit gets throttled (not killed). Limits are
+# 4x the requests so workers can burst for heavy tiles while still being
+# constrained.
+worker_memory_request: "2Gi"
+worker_memory_limit: "8Gi"
+worker_cpu_request: "500m"
+worker_cpu_limit: "4"
+
+# INFO instead of DEBUG — production logs are read by humans skimming for
+# errors, not stepped through line by line.
+log_level: "INFO"
+
+# Rotate logs. 10MiB per file, keep 5 backups = 50MiB per worker max.
+max_log_file_bytes: 10485760
+log_backup_count: 5
