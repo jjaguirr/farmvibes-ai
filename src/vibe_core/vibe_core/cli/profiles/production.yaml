@@ -1,0 +1,21 @@
+# FarmVibes.AI Deployment Profile: production
+#
+# Higher-resource profile for production-like testing on capable hardware.
+# More workers, larger memory allocation, less verbose logging.
+#
+# Available keys and constraints:
+#   worker_replicas:      int, 1-64, or "auto" (cpu_count // 2 - 1)
+#   worker_memory_request: str, Kubernetes memory format (e.g. "64Mi", "8Gi")
+#   log_level:            str, one of: DEBUG, INFO, WARNING, ERROR
+#   max_log_file_bytes:   int >= 0 (optional)
+#   log_backup_count:     int >= 0 (optional)
+#   enable_telemetry:     bool
+#   servers:              int, 1-8, k3d server nodes
+#   agents:               int, 0-16, k3d agent nodes
+
+worker_replicas: "auto"
+worker_memory_request: "512Mi"
+log_level: INFO
+enable_telemetry: false
+servers: 1
+agents: 0

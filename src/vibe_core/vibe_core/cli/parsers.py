@@ -212,6 +212,17 @@ class LocalCliParser(CliParser):
                 help="Port to use for registry on host",
             )
 
+            command.add_argument(
+                "--profile",
+                type=str,
+                default=None,
+                help=(
+                    "Deployment profile to use (e.g. minimal, default, production). "
+                    "Profiles set resource defaults. CLI flags override profile values. "
+                    "Also settable via FARMVIBES_PROFILE env var."
+                ),
+            )
+
             if os.path.exists(LOCAL_OTEL_PATH):
                 command.add_argument(
                     "--enable-telemetry",

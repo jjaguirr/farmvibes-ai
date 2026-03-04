@@ -76,6 +76,11 @@ variable "log_backup_count" {
  description = "Number of log files to keep for each service instance"
 }
 
+variable "worker_memory_request" {
+  description = "Memory request for worker pods (e.g. 64Mi, 512Mi, 8Gi)"
+  default     = "100Mi"
+}
+
 variable "environment" {
   description = "Unused"
   default = ""

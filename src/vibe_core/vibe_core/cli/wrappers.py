@@ -493,6 +493,7 @@ class TerraformWrapper:
         rabbitmq_image_tag: str = RABBITMQ_IMAGE_TAG,
         rabbitmq_image_repository: str = RABBITMQ_IMAGE_REPOSITORY,
         is_update: bool = False,
+        worker_memory_request: str = "100Mi",
     ):
         if not is_update:
             self.init(self.os_artifacts.local_directory, False, cleanup_state=False)
@@ -522,6 +523,7 @@ class TerraformWrapper:
             "farmvibes_log_level": log_level,
             "max_log_file_bytes": f"{max_log_file_bytes}" if max_log_file_bytes else "",
             "log_backup_count": f"{log_backup_count}" if log_backup_count else "",
+            "worker_memory_request": worker_memory_request,
         }
 
         state_file = self.os_artifacts.get_terraform_file("local.tfstate", cluster_name)
