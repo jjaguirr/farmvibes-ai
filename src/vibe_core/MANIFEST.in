@@ -1,1 +1,2 @@
 recursive-include vibe_core/terraform *.tf
+recursive-include vibe_core/cli/profiles *.yaml

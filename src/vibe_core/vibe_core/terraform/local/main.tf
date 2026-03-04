@@ -42,7 +42,10 @@ module "services" {
   dapr_sidecars_deployed        = module.kubernetes.ready_to_deploy
   image_tag                     = var.image_tag
   local_deployment              = true
-  worker_memory_request         = "100Mi"
+  worker_memory_request         = var.worker_memory_request
+  worker_memory_limit           = var.worker_memory_limit
+  worker_cpu_request            = var.worker_cpu_request
+  worker_cpu_limit              = var.worker_cpu_limit
   startup_type                  = "local"
   shared_resource_pv_claim_name = module.kubernetes.shared_resource_pv_claim_name
   otel_service_name             = try(module.kubernetes.otel_service_name, "")

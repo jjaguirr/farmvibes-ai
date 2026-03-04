@@ -1,0 +1,24 @@
+# FarmVibes.AI deployment profile: minimal
+#
+# For laptops and resource-constrained dev machines. Single worker, small
+# memory footprint, no resource limits (so the lone worker can burst), verbose
+# logging for debugging.
+#
+# Select with:  farmvibes-ai local setup --profile minimal
+#          or:  FARMVIBES_PROFILE=minimal farmvibes-ai local setup
+#
+# See default.yaml for the full key reference with per-key documentation.
+
+# One worker — overrides the CPU-based auto-detect. On an 8-core laptop the
+# default formula would give you 3 workers, which is overkill for smoke tests.
+worker_replicas: 1
+
+# Small request so the scheduler places the pod even on a crowded k3d node.
+# No limits: let the worker burst if it needs to; there's only one of them.
+worker_memory_request: "100Mi"
+worker_memory_limit: null
+worker_cpu_request: null
+worker_cpu_limit: null
+
+# Verbose logging for local dev.
+log_level: "DEBUG"

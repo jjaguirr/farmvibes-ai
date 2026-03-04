@@ -43,10 +43,9 @@ from vibe_core.cli.wrappers import (
 
 _cfg = _load_config()
 
-DEFAULT_STORAGE_PATH = os.environ.get(
-    "FARMVIBES_AI_STORAGE_PATH",
-    os.path.join(os.path.expanduser("~"), ".cache", "farmvibes-ai"),
-)
+# Legacy env var kept for backward compat; config.storage_path is the new path
+# (which is profile-aware). Legacy env wins if set — it was a documented knob.
+DEFAULT_STORAGE_PATH = os.environ.get("FARMVIBES_AI_STORAGE_PATH", _cfg.storage_path)
 DATA_SUFFIX = "data"
 REDIS_DUMP = "redis-dump.rdb"
 DEFAULT_HOST = _cfg.host
@@ -283,6 +282,10 @@ def setup(
     host: str = DEFAULT_HOST,
     is_update: bool = False,
     registry_port: int = REGISTRY_PORT,
+    worker_memory_request: str = "100Mi",
+    worker_memory_limit: Optional[str] = None,
+    worker_cpu_request: Optional[str] = None,
+    worker_cpu_limit: Optional[str] = None,
 ) -> bool:
     action = "Updating" if is_update else "Setting up"
     progress = ProgressTracker(f"{action} local cluster")
@@ -387,6 +390,10 @@ def setup(
                 kubectl.context_name,
                 enable_telemetry,
                 is_update=is_update,
+                worker_memory_request=worker_memory_request,
+                worker_memory_limit=worker_memory_limit,
+                worker_cpu_request=worker_cpu_request,
+                worker_cpu_limit=worker_cpu_limit,
             )
 
     with progress.step("Fixing file permissions"):
@@ -807,6 +814,10 @@ def dispatch(args: argparse.Namespace):
             args.host,
             is_update=is_update,
             registry_port=args.registry_port,
+            worker_memory_request=args.worker_memory_request,
+            worker_memory_limit=args.worker_memory_limit,
+            worker_cpu_request=args.worker_cpu_request,
+            worker_cpu_limit=args.worker_cpu_limit,
         )
     elif args.action == "destroy":
         return destroy(k3d, data_path=data_path)

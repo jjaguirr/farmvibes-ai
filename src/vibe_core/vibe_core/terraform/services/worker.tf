@@ -104,9 +104,17 @@ resource "kubernetes_deployment" "worker" {
             local.worker_common_args, var.local_deployment ? local.worker_extra_args : []
           ])
           resources {
-            requests = {
-              memory = var.worker_memory_request
-            }
+            # merge() drops keys with null values. Empty-string vars become
+            # null via the ternaries, so an unset limit produces no k8s field
+            # at all (rather than `limits: {}` or `cpu: ""`).
+            requests = merge(
+              { memory = var.worker_memory_request },
+              var.worker_cpu_request != "" ? { cpu = var.worker_cpu_request } : {}
+            )
+            limits = merge(
+              var.worker_memory_limit != "" ? { memory = var.worker_memory_limit } : {},
+              var.worker_cpu_limit != "" ? { cpu = var.worker_cpu_limit } : {}
+            )
           }
           env {
             name  = "HOME"

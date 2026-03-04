@@ -14,7 +14,7 @@ exclude = [
 include_package_data = true
 
 [options.package_data]
-vibe_core = ["terraform/*.tf"]
+vibe_core = ["terraform/*.tf", "cli/profiles/*.yaml"]
 
 [project]
 name = "vibe-core"
@@ -49,6 +49,7 @@ dependencies = [
     "hydra-zen~=0.10",
     "rich~=13.7.1",
     "msal==1.22.0",
+    "PyYAML>=5.0",
 ]
 
 [project.urls]

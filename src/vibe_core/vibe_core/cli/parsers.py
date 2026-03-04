@@ -194,6 +194,30 @@ class LocalCliParser(CliParser):
                 help="Number of worker replicas to use",
             )
             command.add_argument(
+                "--worker-memory-request",
+                type=str,
+                default=_cfg.worker_memory_request,
+                help="K8s memory request per worker pod (e.g. 100Mi, 2Gi)",
+            )
+            command.add_argument(
+                "--worker-memory-limit",
+                type=str,
+                default=_cfg.worker_memory_limit,
+                help="K8s memory limit per worker pod (e.g. 8Gi). Omit for no limit.",
+            )
+            command.add_argument(
+                "--worker-cpu-request",
+                type=str,
+                default=_cfg.worker_cpu_request,
+                help="K8s CPU request per worker pod (e.g. 500m, 0.5, 1)",
+            )
+            command.add_argument(
+                "--worker-cpu-limit",
+                type=str,
+                default=_cfg.worker_cpu_limit,
+                help="K8s CPU limit per worker pod (e.g. 2, 4000m). Omit for no limit.",
+            )
+            command.add_argument(
                 "--port",
                 type=int,
                 default=DEFAULT_PORT,
@@ -232,6 +256,19 @@ class LocalCliParser(CliParser):
                 required=False,
                 default=cluster_name,
                 help="Name of the cluster to operate on",
+            )
+            # --profile is pre-scanned in main.py before this parser is built
+            # (it feeds argparse defaults). It's declared here too so --help
+            # documents it and so argparse doesn't reject it as unknown.
+            command.add_argument(
+                "--profile",
+                required=False,
+                default=None,
+                help=(
+                    "Deployment profile: minimal, default, production, or a "
+                    "custom name. Searches ~/.config/farmvibes-ai/profiles/ "
+                    "then built-ins. Also settable via FARMVIBES_PROFILE."
+                ),
             )
 
     def _verify_cluster_name(self, cluster_name: str):
