@@ -191,7 +191,7 @@ def test_logs_bad_service_lists_available(farmvibes_cli: str, service_url: str) 
         "internal function returns False. The exit-code mapping in "
         "main.py isn't being hit for this path. Filed as follow-up."
     ),
-    strict=False,  # Don't fail the suite if someone fixes it.
+    strict=True,  # Deterministic local-code bug; fail on XPASS so the marker gets removed when fixed.
 )
 def test_logs_bad_service_nonzero_exit(farmvibes_cli: str, service_url: str) -> None:
     del service_url
