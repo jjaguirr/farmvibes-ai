@@ -1,3 +1,4 @@
+import requests
 import pytest
 
 from vibe_core.client import FarmvibesAiClient
@@ -16,7 +17,17 @@ def cluster_url():
 
 @pytest.fixture(scope="session")
 def cluster_client(cluster_url):
-    return ClusterClient(base_url=cluster_url)
+    client = ClusterClient(base_url=cluster_url)
+    # Fail fast if cluster is unreachable — don't let every test hang individually
+    try:
+        r = client.get("/v0/", timeout=5)
+        r.raise_for_status()
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        pytest.exit(
+            f"Cluster unreachable at {cluster_url} — aborting test session.\n{exc}",
+            returncode=1,
+        )
+    return client
 
 
 @pytest.fixture(scope="session")

@@ -44,31 +44,34 @@ class TestInvalidWorkflow:
         assert r.status_code >= 400, f"Expected 4xx, got {r.status_code}: {r.text}"
 
 
-class TestInvalidDateRange:
-    def test_end_before_start_returns_error(self, cluster_client: ClusterClient):
+class TestMalformedPayload:
+    def test_missing_required_fields(self, cluster_client: ClusterClient):
+        """POST /v0/runs with missing fields must return 422."""
+        r = cluster_client.post("/v0/runs", json={"garbage": True})
+        assert r.status_code == 422, f"Expected 422, got {r.status_code}: {r.text}"
+
+    def test_invalid_geojson_type(self, cluster_client: ClusterClient):
+        """POST /v0/runs with geojson as a string instead of dict must return 422."""
         r = cluster_client.post("/v0/runs", json={
-            "name": "bad_dates_test",
+            "name": "bad_geojson_test",
             "workflow": "helloworld",
             "parameters": None,
             "user_input": {
-                "start_date": "2021-03-01T00:00:00+00:00",
-                "end_date": "2021-01-01T00:00:00+00:00",
-                "geojson": {
-                    "type": "FeatureCollection",
-                    "features": [{"type": "Feature", "geometry": {
-                        "type": "Polygon",
-                        "coordinates": [list(VALID_POLYGON.exterior.coords)],
-                    }}],
-                },
+                "start_date": "2021-02-01T00:00:00+00:00",
+                "end_date": "2021-02-11T00:00:00+00:00",
+                "geojson": "not a geojson",
             },
         })
-        # Server should reject or the workflow should fail
-        assert r.status_code >= 400 or r.status_code == 201, (
-            f"Unexpected status code: {r.status_code}"
-        )
-        if r.status_code == 201:
-            # If accepted, the workflow should fail during execution
-            pass  # Acceptable: some workflows accept bad dates and fail gracefully
+        assert r.status_code == 422, f"Expected 422, got {r.status_code}: {r.text}"
+
+    def test_missing_user_input(self, cluster_client: ClusterClient):
+        """POST /v0/runs without user_input must return 422."""
+        r = cluster_client.post("/v0/runs", json={
+            "name": "no_input_test",
+            "workflow": "helloworld",
+            "parameters": None,
+        })
+        assert r.status_code == 422, f"Expected 422, got {r.status_code}: {r.text}"
 
 
 class TestNonexistentRun:

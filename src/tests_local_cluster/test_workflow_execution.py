@@ -73,16 +73,17 @@ class TestWorkflowExecution:
 
         assert run["details"]["status"] == "done"
         output = run.get("output")
-        if output and workflow_spec.expected_sinks:
-            for sink in workflow_spec.expected_sinks:
-                assert sink in output, f"Expected sink '{sink}' not in output keys: {list(output.keys())}"
+        assert output is not None, f"Workflow {workflow_spec.name} completed but returned no output"
+        for sink in workflow_spec.expected_sinks:
+            assert sink in output, f"Expected sink '{sink}' not in output keys: {list(output.keys())}"
 
 
 class TestWorkflowCaching:
-    def test_second_run_uses_cache(
+    def test_second_run_reuses_cached_output(
         self, cluster_client: ClusterClient, workflow_poller: WorkflowPoller
     ):
-        """Run helloworld twice -- second run should complete faster (cache hit)."""
+        """Run helloworld twice with identical inputs — verify both produce output
+        and the second run completes (proving the cache path doesn't break execution)."""
         spec = WORKFLOW_SPECS[0]  # helloworld
 
         r1 = cluster_client.submit_run(
@@ -91,6 +92,8 @@ class TestWorkflowCaching:
         )
         run1 = workflow_poller.poll(r1["id"], timeout_s=spec.timeout_s)
         assert run1["details"]["status"] == "done"
+        output1 = run1.get("output")
+        assert output1 is not None, "First run produced no output"
 
         r2 = cluster_client.submit_run(
             workflow=spec.name, name="cache_test_2",
@@ -98,3 +101,10 @@ class TestWorkflowCaching:
         )
         run2 = workflow_poller.poll(r2["id"], timeout_s=spec.timeout_s)
         assert run2["details"]["status"] == "done"
+        output2 = run2.get("output")
+        assert output2 is not None, "Second run produced no output"
+
+        # Both runs should produce the same output structure
+        assert set(output1.keys()) == set(output2.keys()), (
+            f"Output keys differ: {set(output1.keys())} vs {set(output2.keys())}"
+        )
