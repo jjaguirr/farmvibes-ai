@@ -14,6 +14,11 @@ from rich.console import Console
 from rich.table import Table
 
 from vibe_core.cli.config import load_config as _load_config
+from vibe_core.cli.profiles import (
+    ProfileValidationError,
+    load_profile,
+    resolve_profile_args,
+)
 from vibe_core.cli.constants import (
     AZURE_CR_DOMAIN,
     DEFAULT_IMAGE_PREFIX,
@@ -283,6 +288,7 @@ def setup(
     host: str = DEFAULT_HOST,
     is_update: bool = False,
     registry_port: int = REGISTRY_PORT,
+    worker_memory_request: str = "100Mi",
 ) -> bool:
     action = "Updating" if is_update else "Setting up"
     progress = ProgressTracker(f"{action} local cluster")
@@ -387,6 +393,7 @@ def setup(
                 kubectl.context_name,
                 enable_telemetry,
                 is_update=is_update,
+                worker_memory_request=worker_memory_request,
             )
 
     with progress.step("Fixing file permissions"):
@@ -787,6 +794,48 @@ def dispatch(args: argparse.Namespace):
                 log("Aborting update due to old cluster being present", level="error")
                 return False
         enable_telemetry = args.enable_telemetry if hasattr(args, "enable_telemetry") else False
+
+        # --- Profile resolution ---
+        profile_name = getattr(args, "profile", None) or os.environ.get("FARMVIBES_PROFILE")
+        if profile_name:
+            try:
+                profile_overrides = load_profile(profile_name)
+            except (FileNotFoundError, ProfileValidationError) as e:
+                show_error("Profile error", str(e))
+                return False
+
+            # Detect explicitly-set CLI args by comparing against known defaults
+            _PROFILE_OVERRIDABLE = {
+                "worker_replicas": _cfg.worker_replicas,
+                "worker_memory_request": _cfg.worker_memory_request,
+                "log_level": _cfg.log_level,
+                "max_log_file_bytes": None,
+                "log_backup_count": None,
+                "enable_telemetry": False,
+                "servers": 1,
+                "agents": 0,
+            }
+
+            cli_explicit = {}
+            for key, default_val in _PROFILE_OVERRIDABLE.items():
+                arg_val = getattr(args, key, default_val)
+                if arg_val != default_val:
+                    cli_explicit[key] = arg_val
+
+            merged = resolve_profile_args(
+                {k: getattr(args, k, v) for k, v in _PROFILE_OVERRIDABLE.items()},
+                profile_overrides,
+                cli_explicit,
+            )
+
+            # Apply merged values back to args
+            for key, value in merged.items():
+                if hasattr(args, key):
+                    setattr(args, key, value)
+            enable_telemetry = merged.get("enable_telemetry", enable_telemetry)
+
+        worker_memory_request = getattr(args, "worker_memory_request", _cfg.worker_memory_request)
+
         return setup(
             k3d,
             args.servers,
@@ -807,6 +856,7 @@ def dispatch(args: argparse.Namespace):
             args.host,
             is_update=is_update,
             registry_port=args.registry_port,
+            worker_memory_request=worker_memory_request,
         )
     elif args.action == "destroy":
         return destroy(k3d, data_path=data_path)
