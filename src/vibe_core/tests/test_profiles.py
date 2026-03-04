@@ -15,13 +15,15 @@ import pytest
 # =============================================================================
 
 class TestValidateProfileKeys:
-    def test_all_known_keys_pass(self):
-        from vibe_core.cli.profiles import validate_profile_keys
-        validate_profile_keys(
-            profile={"worker_replicas": 3, "log_level": "INFO"},
-            schema={"worker_replicas", "log_level", "port"},
-            source="test.yaml",
-        )  # should not raise
+    def test_known_keys_accepted_unknown_rejected_same_schema(self):
+        """Boundary: adding one out-of-schema key to an otherwise-valid profile flips
+        the result. Proves the validator isn't a no-op AND actually consults the schema."""
+        from vibe_core.cli.profiles import ProfileError, validate_profile_keys
+        schema = {"worker_replicas", "log_level", "port"}
+        good = {"worker_replicas": 3, "log_level": "INFO"}
+        validate_profile_keys(good, schema, "t.yaml")
+        with pytest.raises(ProfileError, match="extra"):
+            validate_profile_keys({**good, "extra": 1}, schema, "t.yaml")
 
     def test_unknown_key_raises_with_key_name_in_message(self):
         from vibe_core.cli.profiles import ProfileError, validate_profile_keys
@@ -53,18 +55,22 @@ class TestValidateProfileKeys:
         assert "typo_one" in msg
         assert "typo_two" in msg
 
-    def test_empty_profile_is_valid(self):
-        from vibe_core.cli.profiles import validate_profile_keys
-        validate_profile_keys(profile={}, schema={"anything"}, source="empty.yaml")
+    def test_empty_profile_valid_even_against_empty_schema(self):
+        """{} has zero keys to check — vacuously valid. But a single key vs empty
+        schema must fail. Proves 'empty is valid' isn't just a no-op validator."""
+        from vibe_core.cli.profiles import ProfileError, validate_profile_keys
+        validate_profile_keys({}, set(), "empty.yaml")
+        with pytest.raises(ProfileError, match="anything"):
+            validate_profile_keys({"anything": 1}, set(), "empty.yaml")
 
-    def test_schema_is_not_farmvibes_coupled(self):
-        """Validator is generic: schema is just a set of strings, works with ANY schema."""
-        from vibe_core.cli.profiles import validate_profile_keys
-        validate_profile_keys(
-            profile={"foo": 1, "bar": 2},
-            schema={"foo", "bar", "baz"},  # arbitrary schema, no FarmVibes keys
-            source="generic.yaml",
-        )
+    def test_validator_is_schema_driven_not_hardcoded(self):
+        """Same key, same profile, different schema → different outcome.
+        Proves the schema argument is authoritative, not a hardcoded allowlist."""
+        from vibe_core.cli.profiles import ProfileError, validate_profile_keys
+        profile = {"foo": 1}
+        validate_profile_keys(profile, {"foo", "bar"}, "x.yaml")
+        with pytest.raises(ProfileError, match="foo"):
+            validate_profile_keys(profile, {"bar", "baz"}, "x.yaml")
 
 
 # =============================================================================
