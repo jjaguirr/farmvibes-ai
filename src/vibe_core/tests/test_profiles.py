@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import os
+from multiprocessing import cpu_count
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ import pytest
 
 from vibe_core.cli.profiles import ProfileValidationError, validate_profile
 from vibe_core.cli.profiles import load_profile, PROFILE_SCHEMA
+from vibe_core.cli.profiles import resolve_profile_args
 
 # A minimal schema for testing — generic, not FarmVibes-specific
 SCHEMA = {
@@ -137,3 +139,60 @@ class TestLoadProfile:
 
         with pytest.raises(ProfileValidationError, match="Unknown profile key 'workerz_count'"):
             load_profile("typo", user_profile_dir=user_profiles)
+
+
+class TestResolveProfileArgs:
+    """Profile values override defaults; CLI args override profiles."""
+
+    def test_profile_overrides_defaults(self):
+        defaults = {"worker_replicas": 4, "log_level": "DEBUG"}
+        profile = {"worker_replicas": 1, "log_level": "INFO"}
+        cli_explicit = {}
+
+        result = resolve_profile_args(defaults, profile, cli_explicit)
+        assert result["worker_replicas"] == 1
+        assert result["log_level"] == "INFO"
+
+    def test_cli_overrides_profile(self):
+        defaults = {"worker_replicas": 4}
+        profile = {"worker_replicas": 1}
+        cli_explicit = {"worker_replicas": 8}
+
+        result = resolve_profile_args(defaults, profile, cli_explicit)
+        assert result["worker_replicas"] == 8
+
+    def test_default_used_when_no_profile_or_cli(self):
+        defaults = {"worker_replicas": 4, "log_level": "DEBUG"}
+        profile = {}
+        cli_explicit = {}
+
+        result = resolve_profile_args(defaults, profile, cli_explicit)
+        assert result["worker_replicas"] == 4
+        assert result["log_level"] == "DEBUG"
+
+    def test_auto_sentinel_resolves_to_cpu_calculation(self):
+        defaults = {"worker_replicas": 4}
+        profile = {"worker_replicas": "auto"}
+        cli_explicit = {}
+
+        result = resolve_profile_args(defaults, profile, cli_explicit)
+        expected = max(1, cpu_count() // 2 - 1)
+        assert result["worker_replicas"] == expected
+
+    def test_cli_overrides_auto_sentinel(self):
+        defaults = {"worker_replicas": 4}
+        profile = {"worker_replicas": "auto"}
+        cli_explicit = {"worker_replicas": 2}
+
+        result = resolve_profile_args(defaults, profile, cli_explicit)
+        assert result["worker_replicas"] == 2
+
+    def test_mixed_sources(self):
+        defaults = {"worker_replicas": 4, "log_level": "DEBUG", "servers": 1}
+        profile = {"worker_replicas": 1}
+        cli_explicit = {"log_level": "ERROR"}
+
+        result = resolve_profile_args(defaults, profile, cli_explicit)
+        assert result["worker_replicas"] == 1  # from profile
+        assert result["log_level"] == "ERROR"  # from CLI
+        assert result["servers"] == 1          # from default

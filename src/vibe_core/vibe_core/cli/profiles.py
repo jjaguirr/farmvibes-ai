@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import re
+from multiprocessing import cpu_count
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -150,3 +151,32 @@ def load_profile(
         )
 
     return validate_profile(data, PROFILE_SCHEMA)
+
+
+def resolve_profile_args(
+    defaults: Dict[str, Any],
+    profile: Dict[str, Any],
+    cli_explicit: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Merge config layers: defaults -> profile -> CLI args.
+
+    The "auto" sentinel for int fields resolves to max(1, cpu_count() // 2 - 1).
+
+    Args:
+        defaults: Base default values.
+        profile: Profile overrides (from YAML).
+        cli_explicit: Explicitly-provided CLI arguments (not argparse defaults).
+
+    Returns:
+        Merged config dict.
+    """
+    result = dict(defaults)
+    result.update(profile)
+    result.update(cli_explicit)
+
+    # Resolve "auto" sentinels
+    for key, value in result.items():
+        if value == "auto":
+            result[key] = max(1, cpu_count() // 2 - 1)
+
+    return result
