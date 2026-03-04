@@ -799,7 +799,10 @@ def dispatch(args: argparse.Namespace):
         profile_name = getattr(args, "profile", None) or os.environ.get("FARMVIBES_PROFILE")
         if profile_name:
             try:
-                profile_overrides = load_profile(profile_name)
+                user_profiles_dir = os_artifacts.config_dir / "profiles"
+                profile_overrides = load_profile(
+                    profile_name, user_profile_dir=user_profiles_dir
+                )
             except (FileNotFoundError, ProfileValidationError) as e:
                 show_error("Profile error", str(e))
                 return False
@@ -830,8 +833,7 @@ def dispatch(args: argparse.Namespace):
 
             # Apply merged values back to args
             for key, value in merged.items():
-                if hasattr(args, key):
-                    setattr(args, key, value)
+                setattr(args, key, value)
             enable_telemetry = merged.get("enable_telemetry", enable_telemetry)
 
         worker_memory_request = getattr(args, "worker_memory_request", _cfg.worker_memory_request)
