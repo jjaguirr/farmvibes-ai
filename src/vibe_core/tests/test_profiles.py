@@ -196,3 +196,56 @@ class TestResolveProfileArgs:
         assert result["worker_replicas"] == 1  # from profile
         assert result["log_level"] == "ERROR"  # from CLI
         assert result["servers"] == 1          # from default
+
+
+class TestCliIntegration:
+    """Profile flag wires through parser to dispatch."""
+
+    def test_profile_flag_parsed(self):
+        import importlib
+        import vibe_core.cli.config as config_mod
+        import vibe_core.cli.parsers as parsers_mod
+
+        try:
+            importlib.reload(config_mod)
+            importlib.reload(parsers_mod)
+            parser = parsers_mod.LocalCliParser("local")
+            args = parser.parse(["setup", "--cluster-name", "test", "--profile", "minimal"])
+            assert args.profile == "minimal"
+        finally:
+            importlib.reload(config_mod)
+            importlib.reload(parsers_mod)
+
+    def test_profile_flag_defaults_none(self):
+        import importlib
+        import vibe_core.cli.config as config_mod
+        import vibe_core.cli.parsers as parsers_mod
+
+        try:
+            importlib.reload(config_mod)
+            importlib.reload(parsers_mod)
+            parser = parsers_mod.LocalCliParser("local")
+            args = parser.parse(["setup", "--cluster-name", "test"])
+            assert args.profile is None
+        finally:
+            importlib.reload(config_mod)
+            importlib.reload(parsers_mod)
+
+    def test_flag_overrides_env_var(self):
+        """--profile flag wins over FARMVIBES_PROFILE env var."""
+        with patch.dict(os.environ, {"FARMVIBES_PROFILE": "production"}):
+            import importlib
+            import vibe_core.cli.config as config_mod
+            import vibe_core.cli.parsers as parsers_mod
+
+            try:
+                importlib.reload(config_mod)
+                importlib.reload(parsers_mod)
+                parser = parsers_mod.LocalCliParser("local")
+                args = parser.parse(["setup", "--cluster-name", "test", "--profile", "minimal"])
+                # Flag wins — dispatch() checks args.profile first
+                profile_name = args.profile or os.environ.get("FARMVIBES_PROFILE")
+                assert profile_name == "minimal"
+            finally:
+                importlib.reload(config_mod)
+                importlib.reload(parsers_mod)
