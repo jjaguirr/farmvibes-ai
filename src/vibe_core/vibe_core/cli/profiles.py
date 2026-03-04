@@ -2,7 +2,10 @@
 # Licensed under the MIT License.
 
 import re
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+import yaml
 
 
 class ProfileValidationError(ValueError):
@@ -78,3 +81,72 @@ def validate_profile(
                 )
 
     return profile
+
+
+PROFILE_SCHEMA = {
+    "worker_replicas": {"type": int, "min": 1, "max": 64},
+    "worker_memory_request": {"type": str, "pattern": r"^[1-9]\d*([EPTGMK]i?)?$"},
+    "log_level": {"type": str, "choices": ["DEBUG", "INFO", "WARNING", "ERROR"]},
+    "max_log_file_bytes": {"type": int, "min": 0, "optional": True},
+    "log_backup_count": {"type": int, "min": 0, "optional": True},
+    "enable_telemetry": {"type": bool},
+    "servers": {"type": int, "min": 1, "max": 8},
+    "agents": {"type": int, "min": 0, "max": 16},
+}
+
+_BUILTIN_DIR = Path(__file__).parent / "profiles"
+
+
+def load_profile(
+    name: str,
+    user_profile_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Load and validate a named profile.
+
+    Search order:
+        1. user_profile_dir/{name}.yaml (if provided)
+        2. Built-in profiles directory
+
+    Args:
+        name: Profile name (without .yaml extension).
+        user_profile_dir: Optional user config directory for custom profiles.
+
+    Returns:
+        Validated profile dict.
+
+    Raises:
+        FileNotFoundError: If no profile file found.
+        ProfileValidationError: If YAML is invalid or profile fails validation.
+    """
+    candidates = []
+    if user_profile_dir:
+        candidates.append(Path(user_profile_dir) / f"{name}.yaml")
+    candidates.append(_BUILTIN_DIR / f"{name}.yaml")
+
+    profile_path = None
+    for candidate in candidates:
+        if candidate.exists():
+            profile_path = candidate
+            break
+
+    if profile_path is None:
+        raise FileNotFoundError(
+            f"No profile found named '{name}'. "
+            f"Searched: {', '.join(str(c) for c in candidates)}"
+        )
+
+    raw = profile_path.read_text()
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as e:
+        raise ProfileValidationError(f"Invalid YAML in profile '{name}': {e}")
+
+    if data is None:
+        data = {}
+
+    if not isinstance(data, dict):
+        raise ProfileValidationError(
+            f"Profile '{name}' must be a YAML mapping, got {type(data).__name__}"
+        )
+
+    return validate_profile(data, PROFILE_SCHEMA)

@@ -1,9 +1,14 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import os
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 from vibe_core.cli.profiles import ProfileValidationError, validate_profile
+from vibe_core.cli.profiles import load_profile, PROFILE_SCHEMA
 
 # A minimal schema for testing — generic, not FarmVibes-specific
 SCHEMA = {
@@ -76,3 +81,59 @@ class TestValidateProfile:
     def test_auto_sentinel_passes_for_int(self):
         result = validate_profile({"count": "auto"}, SCHEMA)
         assert result["count"] == "auto"
+
+
+class TestLoadProfile:
+    def test_loads_builtin_minimal(self):
+        profile = load_profile("minimal")
+        assert profile["worker_replicas"] == 1
+        assert profile["worker_memory_request"] == "64Mi"
+
+    def test_loads_builtin_default(self):
+        profile = load_profile("default")
+        assert profile["worker_replicas"] == "auto"
+
+    def test_loads_builtin_production(self):
+        profile = load_profile("production")
+        assert profile["worker_memory_request"] == "512Mi"
+
+    def test_missing_profile_raises(self):
+        with pytest.raises(FileNotFoundError, match="No profile found"):
+            load_profile("nonexistent")
+
+    def test_user_dir_takes_precedence(self, tmp_path):
+        user_profiles = tmp_path / "profiles"
+        user_profiles.mkdir()
+        custom = user_profiles / "minimal.yaml"
+        custom.write_text("worker_replicas: 42\n")
+
+        profile = load_profile("minimal", user_profile_dir=user_profiles)
+        assert profile["worker_replicas"] == 42
+
+    def test_custom_profile_from_user_dir(self, tmp_path):
+        user_profiles = tmp_path / "profiles"
+        user_profiles.mkdir()
+        custom = user_profiles / "staging.yaml"
+        custom.write_text("worker_replicas: 2\nworker_memory_request: 256Mi\n")
+
+        profile = load_profile("staging", user_profile_dir=user_profiles)
+        assert profile["worker_replicas"] == 2
+        assert profile["worker_memory_request"] == "256Mi"
+
+    def test_invalid_yaml_raises(self, tmp_path):
+        user_profiles = tmp_path / "profiles"
+        user_profiles.mkdir()
+        bad = user_profiles / "bad.yaml"
+        bad.write_text("{{not: valid: yaml::")
+
+        with pytest.raises(ProfileValidationError, match="Invalid YAML"):
+            load_profile("bad", user_profile_dir=user_profiles)
+
+    def test_profile_with_unknown_key_raises(self, tmp_path):
+        user_profiles = tmp_path / "profiles"
+        user_profiles.mkdir()
+        bad = user_profiles / "typo.yaml"
+        bad.write_text("workerz_count: 3\n")
+
+        with pytest.raises(ProfileValidationError, match="Unknown profile key 'workerz_count'"):
+            load_profile("typo", user_profile_dir=user_profiles)
