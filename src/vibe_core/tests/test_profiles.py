@@ -310,6 +310,78 @@ class TestConfigLayering:
 
 
 # =============================================================================
+# End-to-end: profile -> argparse defaults
+# =============================================================================
+
+class TestProfileFlowsToArgparse:
+    """Profile values must become argparse defaults, and CLI flags must still win."""
+
+    def _apply_and_parse(self, profile_name, cli_argv):
+        """Helper: apply profile, reload parser modules, parse argv."""
+        import importlib
+        import sys
+        import vibe_core.cli.config as config_mod
+        import vibe_core.cli.parsers as parsers_mod
+        from vibe_core.cli.profiles import BUILTIN_PROFILES_DIR, load_profile
+
+        overrides, _ = load_profile(profile_name, search_dirs=[BUILTIN_PROFILES_DIR])
+        orig_load = config_mod.load_config
+        try:
+            config_mod.load_config = lambda: orig_load(profile_overrides=overrides)
+            importlib.reload(parsers_mod)
+            parser = parsers_mod.LocalCliParser("local")
+            return parser.parse(cli_argv)
+        finally:
+            config_mod.load_config = orig_load
+            importlib.reload(parsers_mod)
+
+    def test_production_profile_sets_argparse_defaults(self):
+        with patch.dict(os.environ, {}, clear=False):
+            for k in list(os.environ):
+                if k.startswith("FARMVIBES_"):
+                    del os.environ[k]
+            args = self._apply_and_parse(
+                "production", ["setup", "--cluster-name", "t"]
+            )
+        assert args.worker_replicas == 8
+        assert args.worker_memory_request == "2Gi"
+        assert args.worker_memory_limit == "8Gi"
+        assert args.worker_cpu_limit == "4"
+        assert args.log_level == "INFO"
+
+    def test_minimal_profile_sets_single_worker(self):
+        with patch.dict(os.environ, {}, clear=False):
+            for k in list(os.environ):
+                if k.startswith("FARMVIBES_"):
+                    del os.environ[k]
+            args = self._apply_and_parse(
+                "minimal", ["setup", "--cluster-name", "t"]
+            )
+        assert args.worker_replicas == 1
+        assert args.worker_memory_limit is None
+
+    def test_cli_flag_beats_profile_end_to_end(self):
+        """Full chain: production profile says 8 replicas, CLI says 3, CLI wins."""
+        with patch.dict(os.environ, {}, clear=False):
+            for k in list(os.environ):
+                if k.startswith("FARMVIBES_"):
+                    del os.environ[k]
+            args = self._apply_and_parse(
+                "production",
+                ["setup", "--cluster-name", "t", "--worker-replicas", "3"],
+            )
+        assert args.worker_replicas == 3
+
+    def test_env_beats_profile_end_to_end(self):
+        """production profile says 8, env says 5, env wins."""
+        with patch.dict(os.environ, {"FARMVIBES_WORKER_REPLICAS": "5"}):
+            args = self._apply_and_parse(
+                "production", ["setup", "--cluster-name", "t"]
+            )
+        assert args.worker_replicas == 5
+
+
+# =============================================================================
 # New field validators
 # =============================================================================
 

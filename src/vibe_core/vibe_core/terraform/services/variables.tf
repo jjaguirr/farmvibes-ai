@@ -75,6 +75,21 @@ variable "worker_memory_request" {
   default = "8Gi"
 }
 
+variable "worker_memory_limit" {
+  description = "K8s memory limit per worker pod. Empty string = no limit."
+  default     = ""
+}
+
+variable "worker_cpu_request" {
+  description = "K8s CPU request per worker pod. Empty string = no request."
+  default     = ""
+}
+
+variable "worker_cpu_limit" {
+  description = "K8s CPU limit per worker pod. Empty string = no limit."
+  default     = ""
+}
+
 variable "startup_type" {
 }
 

@@ -7,17 +7,58 @@ import sys
 from vibe_core.cli.logging import set_log_level, setup_logging
 
 from .helper import set_auto_confirm
-from .local import dispatch as dispatch_local
 from .logging import log
-from .parsers import LocalCliParser, RemoteCliParser
-from .remote import dispatch as dispatch_remote
 from .workflow import main as workflow_main
 
 
+def _resolve_and_apply_profile():
+    """Resolve the active deployment profile and inject it into config.
+
+    This MUST run before parsers/local/remote are imported: those modules call
+    load_config() at import time and bake the values into argparse defaults.
+    Chicken-and-egg is broken by pre-scanning argv, same as --verbose.
+
+    Returns the profile name on success, or None if profile handling failed
+    (error already printed).
+    """
+    from .config import FarmVibesConfig, load_config
+    from .profiles import (
+        ProfileError,
+        load_profile,
+        resolve_profile_name,
+        validate_profile_keys,
+    )
+
+    name = resolve_profile_name(sys.argv[1:])
+    try:
+        overrides, source = load_profile(name)
+        validate_profile_keys(overrides, set(FarmVibesConfig.__fields__), source)
+    except ProfileError as e:
+        print(f"Profile error: {e}", file=sys.stderr)
+        return None
+
+    # Re-wire load_config so every subsequent caller (parsers.py import,
+    # local.py import, dispatch validation) picks up profile overrides.
+    import vibe_core.cli.config as config_mod
+    config_mod.load_config = lambda: load_config(profile_overrides=overrides)
+
+    return name
+
+
 def main():
-    # Handle 'workflow' command separately (doesn't need cluster type)
+    # Handle 'workflow' command separately (doesn't need cluster type or profiles)
     if len(sys.argv) > 1 and sys.argv[1] == "workflow":
         sys.exit(workflow_main(sys.argv[2:]))
+
+    # Resolve profile BEFORE importing parsers — config is baked at import time.
+    profile_name = _resolve_and_apply_profile()
+    if profile_name is None:
+        sys.exit(1)
+
+    # Now safe to import modules that read config at import time.
+    from .local import dispatch as dispatch_local
+    from .parsers import LocalCliParser, RemoteCliParser
+    from .remote import dispatch as dispatch_remote
 
     parser = argparse.ArgumentParser(description="FarmVibes.AI cluster deployment tool")
     parser.add_argument(
@@ -65,6 +106,7 @@ def main():
         set_log_level("DEBUG")
 
     args = parser.parse(unknown_args)
+    log(f"Active deployment profile: {profile_name}")
     try:
         result = dispatcher(args)
         if isinstance(result, int):

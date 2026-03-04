@@ -39,6 +39,26 @@ variable "worker_replicas" {
   default = 1
 }
 
+variable "worker_memory_request" {
+  description = "K8s memory request per worker pod (e.g. 100Mi, 2Gi)"
+  default     = "100Mi"
+}
+
+variable "worker_memory_limit" {
+  description = "K8s memory limit per worker pod. Empty string = no limit."
+  default     = ""
+}
+
+variable "worker_cpu_request" {
+  description = "K8s CPU request per worker pod (e.g. 500m, 0.5). Empty string = no request."
+  default     = ""
+}
+
+variable "worker_cpu_limit" {
+  description = "K8s CPU limit per worker pod (e.g. 2, 4000m). Empty string = no limit."
+  default     = ""
+}
+
 variable "image_prefix" {
   default     = ""
   description = "Prefix for the image name"
